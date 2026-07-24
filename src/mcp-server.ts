@@ -22,7 +22,6 @@ import {
   type Device,
   type Platform,
 } from "@wyre-technology/node-datto-rmm";
-import { setServerRef } from "./utils/server-ref.js";
 import { elicitSelection } from "./utils/elicitation.js";
 import {
   ALERT_CARD_META,
@@ -220,6 +219,13 @@ export async function findDevicesByHostname(
 // Server factory — creates a fresh server per request (stateless HTTP mode)
 // ---------------------------------------------------------------------------
 
+/**
+ * The returned server is NOT registered as "the" server anywhere here —
+ * callers are responsible for binding it into the per-request `server-ref`
+ * AsyncLocalStorage context (via `runWithServerRef` / `bindServerRef`) so
+ * elicitation helpers (`utils/elicitation.ts`) resolve the right server
+ * even after await gaps. See `utils/server-ref.ts` for why this matters.
+ */
 export function createMcpServer(credentialOverrides?: DattoCredentials): Server {
   const server = new Server(
     {
@@ -233,8 +239,6 @@ export function createMcpServer(credentialOverrides?: DattoCredentials): Server 
       },
     }
   );
-
-  setServerRef(server);
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     return {

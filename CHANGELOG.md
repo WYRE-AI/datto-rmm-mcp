@@ -1,5 +1,57 @@
 ## [Unreleased]
 
+### Security
+
+- **Cross-tenant elicitation/confirmation misroute (gateway mode).** The
+  "server reference" used by elicitation helpers (`src/utils/elicitation.ts`
+  — `elicitSelection` / `elicitText` / `elicitConfirmation`) was stored in a
+  module-level `let _server: Server | null` singleton in
+  `src/utils/server-ref.ts`, set synchronously per request via
+  `setServerRef(server)` (called from `createMcpServer()` in
+  `src/mcp-server.ts`) and read back later via `getServerRef()` — including
+  after `await` gaps inside async tool handlers (e.g. after awaiting a
+  Datto RMM API call, before sending an elicitation/confirmation prompt
+  back through "the" server — as `datto_list_devices` and
+  `datto_list_alerts` do when asking the user to narrow by site).
+  - **Impact:** in gateway (multi-tenant HTTP) mode — `AUTH_MODE=gateway`
+    — a fresh `Server` is created per inbound request (Node HTTP in
+    `src/index.ts`, and the Cloudflare Workers entrypoint in
+    `src/worker.ts`), so two concurrent tenant requests could race through
+    the shared global: tenant A's request sets the ref and starts awaiting
+    async work; before A resumes, tenant B's request runs and overwrites
+    the module-level ref with B's server/transport; when A's awaited work
+    resolves and it reads the ref back to call `elicitInput`, it gets B's
+    server — so A's elicitation/confirmation prompt is sent down B's
+    connection instead of A's (or vice versa, depending on timing). Same
+    shared-mutable-state-across-await-gaps bug class as
+    liongard-mcp#58, ninjaone-mcp#71, and halopsa-mcp#65, but in the
+    server/transport routing subsystem for elicitation, not
+    credential/token caching.
+  - **Fix:** replaced the module-level singleton with an
+    `AsyncLocalStorage<Server>` context in `src/utils/server-ref.ts`:
+    `runWithServerRef(server, fn)` binds `server` to the async context for
+    per-request transports (Node HTTP, Workers), and `bindServerRef(server)`
+    binds it for the process lifetime in the single-session stdio
+    transport. `getServerRef()` now reads from the ALS context instead of
+    a shared variable, so it is correctly scoped to the request that
+    created it and survives arbitrary `await` gaps without observing a
+    concurrent request's server. There is no module-level mutable
+    server/transport state left in `src/utils/server-ref.ts`. Call sites
+    updated: `src/mcp-server.ts` (`createMcpServer` no longer calls
+    `setServerRef`), `src/index.ts` (Node HTTP handler wraps the
+    connect/handleRequest/catch chain in `runWithServerRef`; stdio calls
+    `bindServerRef` once at startup), `src/worker.ts` (Workers `fetch`
+    handler wraps the connect/handleRequest chain in `runWithServerRef`).
+  - **Regression test:** `src/__tests__/server-ref.test.ts` forces a
+    deterministic interleave (a manually-resolved "gate" promise, not a
+    timing stagger) where tenant A binds its server and suspends on an
+    await gap, tenant B's entire request runs to completion in the
+    meantime, and only then does tenant A resume and elicit. The test
+    asserts by value which tenant's mock `elicitInput` actually received
+    each message. Verified to fail with the exact predicted symptom
+    (`expected 'tenant-B' to be 'tenant-A'`) against a reinstated
+    module-singleton implementation, and to pass against the ALS-based fix.
+
 ### Added
 
 - **Interactive alert card via MCP Apps (SEP-1865).** A new `datto_get_alert` tool fetches a single alert by UID, and its results render as an interactive card in MCP Apps hosts (Claude Desktop/web, and other hosts advertising the `io.modelcontextprotocol/ui` extension), instead of a wall of JSON. The card shows the alert type (label-resolved from the alert context via the SDK's `ALERT_CONTEXT_TYPES` mapping), priority, status, device hostname, site name, category, timestamp, and message — and includes a working "Resolve alert" round-trip that calls `datto_resolve_alert` from inside the card. Non-App hosts are unaffected: the tool's JSON payload is the raw alert plus a new `_card` field.
