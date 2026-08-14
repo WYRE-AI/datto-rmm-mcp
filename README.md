@@ -106,10 +106,44 @@ Datto RMM uses regional API endpoints. Select the platform that matches your acc
 
 ## Docker
 
+### Use the prebuilt image (no build, no token)
+
 ```bash
-docker build -t datto-rmm-mcp .
-docker run -e DATTO_API_KEY=xxx -e DATTO_API_SECRET=xxx -e DATTO_PLATFORM=concord datto-rmm-mcp
+docker pull ghcr.io/wyre-technology/datto-rmm-mcp:latest
+
+docker run -p 8080:8080 \
+  -e DATTO_API_KEY=xxx \
+  -e DATTO_API_SECRET=xxx \
+  -e DATTO_PLATFORM=concord \
+  ghcr.io/wyre-technology/datto-rmm-mcp:latest
 ```
+
+The image is public and pulls anonymously, so this path needs no GitHub token at all.
+
+### Build from source
+
+The build installs `@wyre-technology/node-datto-rmm` from GitHub Packages, which
+requires a token even though the package is public (see
+[One-Click Deployment](#one-click-deployment)). The `Dockerfile` takes it as the
+`GITHUB_TOKEN` build arg — omit it and the build fails at `npm ci` with
+`npm error 401 Unauthorized ... npm.pkg.github.com`:
+
+```bash
+docker build --build-arg GITHUB_TOKEN=$(gh auth token) -t datto-rmm-mcp .
+
+docker run -p 8080:8080 \
+  -e DATTO_API_KEY=xxx \
+  -e DATTO_API_SECRET=xxx \
+  -e DATTO_PLATFORM=concord \
+  datto-rmm-mcp
+```
+
+The token is written to a temporary `.npmrc` that is deleted in the same layer, so
+it is never baked into the image.
+
+> [!NOTE]
+> The image defaults to `MCP_TRANSPORT=http` on port 8080, so `-p 8080:8080` is
+> required to reach it. Health check: `curl http://localhost:8080/health`.
 
 ## License
 
