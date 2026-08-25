@@ -4,7 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile
       target: production
-    image: ghcr.io/wyre-technology/datto-rmm-mcp:latest
+    image: ghcr.io/wyre-ai/datto-rmm-mcp:latest
     container_name: datto-rmm-mcp-server
     restart: unless-stopped
     ports:
