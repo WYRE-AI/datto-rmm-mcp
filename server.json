@@ -1,18 +1,18 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.wyre-technology/datto-rmm-mcp",
+  "name": "io.github.WYRE-AI/datto-rmm-mcp",
   "title": "Datto RMM",
   "description": "MCP server for Datto RMM — devices, alerts, sites, jobs, and audit data.",
   "repository": {
-    "url": "https://github.com/wyre-technology/datto-rmm-mcp",
+    "url": "https://github.com/WYRE-AI/datto-rmm-mcp",
     "source": "github"
   },
   "version": "0.0.0",
-  "websiteUrl": "https://github.com/wyre-technology/datto-rmm-mcp",
+  "websiteUrl": "https://github.com/WYRE-AI/datto-rmm-mcp",
   "packages": [
     {
       "registryType": "oci",
-      "identifier": "ghcr.io/wyre-technology/datto-rmm-mcp:0.0.0",
+      "identifier": "ghcr.io/wyre-ai/datto-rmm-mcp:0.0.0",
       "transport": {
         "type": "stdio"
       },

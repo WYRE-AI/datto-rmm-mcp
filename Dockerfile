@@ -19,7 +19,8 @@ COPY package*.json ./
 # into the image. This ARG-based approach works with one-click build platforms
 # (DigitalOcean App Platform) that inject build-time env vars but do not support
 # BuildKit `--mount=type=secret`.
-RUN echo "@wyre-technology:registry=https://npm.pkg.github.com" > .npmrc && \
+RUN echo "@wyre-ai:registry=https://npm.pkg.github.com" > .npmrc && \
+    echo "@wyre-technology:registry=https://npm.pkg.github.com" >> .npmrc && \
     echo "//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}" >> .npmrc && \
     npm ci --ignore-scripts && \
     rm -f .npmrc
@@ -32,7 +33,8 @@ RUN npm run build
 
 # Prune dev dependencies in builder stage (re-write the temporary .npmrc so npm
 # can re-resolve registry metadata if needed, then remove it again)
-RUN echo "@wyre-technology:registry=https://npm.pkg.github.com" > .npmrc && \
+RUN echo "@wyre-ai:registry=https://npm.pkg.github.com" > .npmrc && \
+    echo "@wyre-technology:registry=https://npm.pkg.github.com" >> .npmrc && \
     echo "//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}" >> .npmrc && \
     npm prune --omit=dev && \
     rm -f .npmrc
@@ -93,9 +95,9 @@ LABEL org.opencontainers.image.description="Model Context Protocol server for Da
 LABEL org.opencontainers.image.version="${VERSION}"
 LABEL org.opencontainers.image.created="${BUILD_DATE}"
 LABEL org.opencontainers.image.revision="${COMMIT_SHA}"
-LABEL org.opencontainers.image.source="https://github.com/wyre-technology/datto-rmm-mcp"
-LABEL org.opencontainers.image.documentation="https://github.com/wyre-technology/datto-rmm-mcp/blob/main/README.md"
-LABEL org.opencontainers.image.url="https://github.com/wyre-technology/datto-rmm-mcp/pkgs/container/datto-rmm-mcp"
+LABEL org.opencontainers.image.source="https://github.com/WYRE-AI/datto-rmm-mcp"
+LABEL org.opencontainers.image.documentation="https://github.com/WYRE-AI/datto-rmm-mcp/blob/main/README.md"
+LABEL org.opencontainers.image.url="https://github.com/WYRE-AI/datto-rmm-mcp/pkgs/container/datto-rmm-mcp"
 LABEL org.opencontainers.image.vendor="Wyre Technology"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
-LABEL io.modelcontextprotocol.server.name="io.github.wyre-technology/datto-rmm-mcp"
+LABEL io.modelcontextprotocol.server.name="io.github.WYRE-AI/datto-rmm-mcp"

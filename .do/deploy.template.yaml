@@ -3,7 +3,7 @@ spec:
   services:
   - name: datto-rmm-mcp
     github:
-      repo: wyre-technology/datto-rmm-mcp
+      repo: WYRE-AI/datto-rmm-mcp
       branch: main
       deploy_on_push: true
     source_dir: /

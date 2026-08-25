@@ -5,9 +5,9 @@
   "version": "0.0.0",
   "description": "MCP server for Datto RMM - access devices, sites, alerts, and jobs through AI assistants",
   "long_description": "Provides AI assistants with structured access to your Datto RMM data. Manage devices, sites, alerts, jobs, and components through the Model Context Protocol.",
-  "author": { "name": "Wyre Technology", "url": "https://github.com/wyre-technology" },
-  "repository": { "type": "git", "url": "https://github.com/wyre-technology/datto-rmm-mcp" },
-  "homepage": "https://github.com/wyre-technology/datto-rmm-mcp",
+  "author": { "name": "Wyre Technology", "url": "https://github.com/WYRE-AI" },
+  "repository": { "type": "git", "url": "https://github.com/WYRE-AI/datto-rmm-mcp" },
+  "homepage": "https://github.com/WYRE-AI/datto-rmm-mcp",
   "license": "Apache-2.0",
   "keywords": ["datto", "rmm", "msp", "devices", "kaseya", "it-management"],
   "server": {

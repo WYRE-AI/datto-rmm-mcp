@@ -21,16 +21,16 @@ MCP server for Datto RMM, enabling Claude to interact with your Datto RMM accoun
 >    - **DigitalOcean App Platform** → set an encrypted env var named **`GITHUB_TOKEN`**
 >      with scope **Build Time** to your PAT (the `.do/deploy.template.yaml` already declares it).
 
-[![Deploy to DO](https://www.deploytodo.com/do-btn-blue.svg)](https://cloud.digitalocean.com/apps/new?repo=https://github.com/wyre-technology/datto-rmm-mcp/tree/main)
+[![Deploy to DO](https://www.deploytodo.com/do-btn-blue.svg)](https://cloud.digitalocean.com/apps/new?repo=https://github.com/WYRE-AI/datto-rmm-mcp/tree/main)
 
-[![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/wyre-technology/datto-rmm-mcp)
+[![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/WYRE-AI/datto-rmm-mcp)
 
 > [!NOTE]
 > The DigitalOcean target builds the full Docker image and runs the complete MCP
 > server over HTTP — this is the recommended path for operators. This repo has no
 > Cloudflare Workers entrypoint (`src/worker.ts`), so the Workers button is not a
 > supported target yet; prefer DigitalOcean or the prebuilt container image
-> (`ghcr.io/wyre-technology/datto-rmm-mcp`).
+> (`ghcr.io/wyre-ai/datto-rmm-mcp`).
 
 ## Features
 
@@ -109,13 +109,13 @@ Datto RMM uses regional API endpoints. Select the platform that matches your acc
 ### Use the prebuilt image (no build, no token)
 
 ```bash
-docker pull ghcr.io/wyre-technology/datto-rmm-mcp:latest
+docker pull ghcr.io/wyre-ai/datto-rmm-mcp:latest
 
 docker run -p 8080:8080 \
   -e DATTO_API_KEY=xxx \
   -e DATTO_API_SECRET=xxx \
   -e DATTO_PLATFORM=concord \
-  ghcr.io/wyre-technology/datto-rmm-mcp:latest
+  ghcr.io/wyre-ai/datto-rmm-mcp:latest
 ```
 
 The image is public and pulls anonymously, so this path needs no GitHub token at all.
