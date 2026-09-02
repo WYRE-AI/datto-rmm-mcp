@@ -4,7 +4,7 @@
  *
  * datto-rmm-mcp's own credential resolution (resolveGatewayCredentials in
  * src/mcp-server.ts) is a pure header read, but the vendored
- * @wyre-technology/node-datto-rmm SDK's AuthManager has its own lazy
+ * @wyre-ai/node-datto-rmm SDK's AuthManager has its own lazy
  * side effect: getToken() calls acquireToken() -> doAcquireToken(), a real
  * outbound OAuth2 password-grant POST to
  * `${apiUrl}/auth/oauth/token` (apiUrl derives from the "platform" -- default

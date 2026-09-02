@@ -22,9 +22,9 @@ import { ALERT_CARD_HTML } from "../src/generated/alert-card-html.js";
 
 const mockAlertsGet = vi.fn();
 
-vi.mock("@wyre-technology/node-datto-rmm", async (importOriginal) => {
+vi.mock("@wyre-ai/node-datto-rmm", async (importOriginal) => {
   const actual =
-    await importOriginal<typeof import("@wyre-technology/node-datto-rmm")>();
+    await importOriginal<typeof import("@wyre-ai/node-datto-rmm")>();
   return {
     ...actual,
     DattoRmmClient: class {

@@ -21,7 +21,7 @@ import {
   DattoRmmClient,
   type Device,
   type Platform,
-} from "@wyre-technology/node-datto-rmm";
+} from "@wyre-ai/node-datto-rmm";
 import { elicitSelection } from "./utils/elicitation.js";
 import {
   ALERT_CARD_META,
