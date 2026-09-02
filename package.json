@@ -42,7 +42,7 @@
   "homepage": "https://github.com/WYRE-AI/datto-rmm-mcp#readme",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@wyre-technology/node-datto-rmm": "^1.0.5"
+    "@wyre-ai/node-datto-rmm": "^1.0.10"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

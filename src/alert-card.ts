@@ -7,7 +7,7 @@
  * simply means the host renders no card while the JSON payload is unchanged.
  */
 
-import { ALERT_CONTEXT_TYPES, type Alert } from "@wyre-technology/node-datto-rmm";
+import { ALERT_CONTEXT_TYPES, type Alert } from "@wyre-ai/node-datto-rmm";
 
 export const ALERT_CARD_RESOURCE_URI = "ui://datto-rmm/alert-card.html";
 

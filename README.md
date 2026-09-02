@@ -5,7 +5,7 @@ MCP server for Datto RMM, enabling Claude to interact with your Datto RMM accoun
 ## One-Click Deployment
 
 > [!IMPORTANT]
-> **Before you click:** this server depends on `@wyre-technology/node-datto-rmm`,
+> **Before you click:** this server depends on `@wyre-ai/node-datto-rmm`,
 > which is hosted on the **GitHub Packages** npm registry. GitHub Packages has no
 > anonymous access — even though the package is public, every `npm install` needs a
 > token. The cloud builder runs `npm install` for you, so you must give it one, or
@@ -122,7 +122,7 @@ The image is public and pulls anonymously, so this path needs no GitHub token at
 
 ### Build from source
 
-The build installs `@wyre-technology/node-datto-rmm` from GitHub Packages, which
+The build installs `@wyre-ai/node-datto-rmm` from GitHub Packages, which
 requires a token even though the package is public (see
 [One-Click Deployment](#one-click-deployment)). The `Dockerfile` takes it as the
 `GITHUB_TOKEN` build arg — omit it and the build fails at `npm ci` with

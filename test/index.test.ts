@@ -15,7 +15,7 @@ const mockAccountDevicesAll = vi.fn();
 const mockAccountSitesAll = vi.fn();
 const mockAccountAlertsOpenAll = vi.fn();
 
-vi.mock('@wyre-technology/node-datto-rmm', () => ({
+vi.mock('@wyre-ai/node-datto-rmm', () => ({
   // A regular function (not an arrow function) so it can be invoked with `new`
   DattoRmmClient: vi.fn().mockImplementation(function () {
     return {
