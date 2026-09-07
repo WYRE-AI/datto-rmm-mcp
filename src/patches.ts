@@ -22,7 +22,7 @@
  * per-patch installed/missing/pending signal this module exists to expose.
  */
 
-import type { Platform } from "@wyre-technology/node-datto-rmm";
+import type { Platform } from "@wyre-ai/node-datto-rmm";
 import type { DattoCredentials } from "./mcp-server.js";
 
 const PLATFORM_URLS: Record<Platform, string> = {
