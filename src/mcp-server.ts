@@ -32,6 +32,7 @@ import {
   buildAlertCard,
 } from "./alert-card.js";
 import { ALERT_CARD_HTML } from "./generated/alert-card-html.js";
+import { getDevicePatches, getSitePatches } from "./patches.js";
 
 // ---------------------------------------------------------------------------
 // Credentials
@@ -436,6 +437,36 @@ export function createMcpServer(credentialOverrides?: DattoCredentials): Server 
             required: ["deviceUid"],
           },
         },
+        {
+          name: "datto_get_device_patches",
+          description:
+            "Get Windows patch installation status for a device - per-patch installed/missing/pending status, severity, reboot requirement, and KB article",
+          inputSchema: {
+            type: "object",
+            properties: {
+              deviceUid: {
+                type: "string",
+                description: "The device UID",
+              },
+            },
+            required: ["deviceUid"],
+          },
+        },
+        {
+          name: "datto_get_site_patches",
+          description:
+            "Get Windows patch installation status across all devices in a site",
+          inputSchema: {
+            type: "object",
+            properties: {
+              siteUid: {
+                type: "string",
+                description: "The site UID",
+              },
+            },
+            required: ["siteUid"],
+          },
+        },
       ],
     };
   });
@@ -732,6 +763,29 @@ export function createMcpServer(credentialOverrides?: DattoCredentials): Server 
           return {
             content: [
               { type: "text", text: JSON.stringify(audit ?? {}, null, 2) },
+            ],
+          };
+        }
+
+        // Not wrapped by the SDK yet (see src/patches.ts's header comment) -
+        // these two call Datto RMM's v2 patch endpoints directly rather than
+        // through `client`.
+        case "datto_get_device_patches": {
+          const { deviceUid } = args as { deviceUid: string };
+          const result = await getDevicePatches(creds, deviceUid);
+          return {
+            content: [
+              { type: "text", text: JSON.stringify(result ?? {}, null, 2) },
+            ],
+          };
+        }
+
+        case "datto_get_site_patches": {
+          const { siteUid } = args as { siteUid: string };
+          const result = await getSitePatches(creds, siteUid);
+          return {
+            content: [
+              { type: "text", text: JSON.stringify(result ?? {}, null, 2) },
             ],
           };
         }
