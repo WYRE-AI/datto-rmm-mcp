@@ -21,6 +21,7 @@ import {
   DattoRmmClient,
   type Device,
   type Platform,
+  type QuickJobRequest,
 } from "@wyre-ai/node-datto-rmm";
 import { elicitSelection } from "./utils/elicitation.js";
 import {
@@ -214,6 +215,39 @@ export async function findDevicesByHostname(
         portalUrl: raw.portalUrl,
       };
     });
+}
+
+// ---------------------------------------------------------------------------
+// Quick job payload shape
+// ---------------------------------------------------------------------------
+
+/**
+ * The correct `POST/PUT .../device/{uid}/quickjob` request body, verified
+ * empirically against the live Datto RMM API (2026-09-14). The API rejects
+ * the flat shape the published `@wyre-ai/node-datto-rmm@1.1.0` types declare
+ * (`{ jobName, componentUid, variables }`) with HTTP 400
+ * `{"errorMessage":"Failed to read request"}` — it never parses and no job
+ * is created. It requires `componentUid` and `variables` nested under
+ * `jobComponent`, with `variables` as an ARRAY of `{name, value}` pairs
+ * rather than a key/value map:
+ *
+ *   { jobName, jobComponent: { componentUid, variables: [{name, value}] } }
+ *
+ * The SDK's `createQuickJob` forwards the request body verbatim, so this
+ * nested shape works at runtime today even though the library's exported
+ * `QuickJobRequest` type is still the wrong flat one. A fix to the library
+ * itself is pending upstream but not yet published. Once
+ * `@wyre-ai/node-datto-rmm` publishes the corrected type, remove this local
+ * interface and the `as unknown as QuickJobRequest` cast at the call site
+ * below — do NOT "simplify" the payload back to the flat shape, it will
+ * start failing against the real API again.
+ */
+interface QuickJobRequestBody {
+  jobName: string;
+  jobComponent: {
+    componentUid: string;
+    variables: { name: string; value: string }[];
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -730,15 +764,25 @@ export function createMcpServer(credentialOverrides?: DattoCredentials): Server 
             variables?: Record<string, string>;
           };
 
-          const jobRequest = {
+          // Public inputSchema keeps `variables` as a friendly key/value map
+          // (a nicer calling convention for an LLM) — convert to the array
+          // of {name, value} pairs the live API actually requires. See the
+          // QuickJobRequestBody comment above for why this nesting exists.
+          const jobRequest: QuickJobRequestBody = {
             jobName,
-            componentUid,
-            variables,
+            jobComponent: {
+              componentUid,
+              variables: Object.entries(variables ?? {}).map(
+                ([name, value]) => ({ name, value })
+              ),
+            },
           };
 
           const result = await client.devices.createQuickJob(
             deviceUid,
-            jobRequest
+            // The published library type for this parameter is the wrong
+            // flat shape — see the QuickJobRequestBody comment above.
+            jobRequest as unknown as QuickJobRequest
           );
           return {
             content: [
