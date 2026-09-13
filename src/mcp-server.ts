@@ -363,6 +363,7 @@ export function createMcpServer(credentialOverrides?: DattoCredentials): Server 
           name: "datto_list_devices",
           description:
             "List all devices in Datto RMM. Can filter by site. To look up a single device by hostname, use datto_find_device instead.",
+          annotations: { readOnlyHint: true },
           inputSchema: {
             type: "object",
             properties: {
@@ -383,6 +384,7 @@ export function createMcpServer(credentialOverrides?: DattoCredentials): Server 
           name: "datto_find_device",
           description:
             "Find a device by hostname and return its UID plus a lightweight summary. Use this before datto_get_device when the user provides a hostname instead of a UID.",
+          annotations: { readOnlyHint: true },
           inputSchema: {
             type: "object",
             properties: {
@@ -415,6 +417,7 @@ export function createMcpServer(credentialOverrides?: DattoCredentials): Server 
           name: "datto_get_device",
           description:
             "Get full details for a specific device by its UID. If you only have a hostname, call datto_find_device first to resolve the UID.",
+          annotations: { readOnlyHint: true },
           inputSchema: {
             type: "object",
             properties: {
@@ -429,6 +432,7 @@ export function createMcpServer(credentialOverrides?: DattoCredentials): Server 
         {
           name: "datto_list_alerts",
           description: "List open alerts. Can filter by site.",
+          annotations: { readOnlyHint: true },
           inputSchema: {
             type: "object",
             properties: {
@@ -448,6 +452,7 @@ export function createMcpServer(credentialOverrides?: DattoCredentials): Server 
         {
           name: "datto_get_alert",
           description: "Get details for a specific alert by its UID",
+          annotations: { readOnlyHint: true },
           _meta: ALERT_CARD_META,
           inputSchema: {
             type: "object",
@@ -478,6 +483,7 @@ export function createMcpServer(credentialOverrides?: DattoCredentials): Server 
         {
           name: "datto_list_sites",
           description: "List all sites in the account",
+          annotations: { readOnlyHint: true },
           inputSchema: {
             type: "object",
             properties: {
@@ -492,6 +498,7 @@ export function createMcpServer(credentialOverrides?: DattoCredentials): Server 
         {
           name: "datto_get_site",
           description: "Get details for a specific site by its UID",
+          annotations: { readOnlyHint: true },
           inputSchema: {
             type: "object",
             properties: {
@@ -507,6 +514,7 @@ export function createMcpServer(credentialOverrides?: DattoCredentials): Server 
           name: "datto_list_components",
           description:
             "List components (the scripts/monitors available to run as quick jobs) in the account, optionally filtered by a case-insensitive substring of the name. Use this to find a componentUid for datto_run_quickjob — otherwise there's no way to get one short of the Datto RMM web UI. Each result's `variables` lists what datto_run_quickjob's `variables` map needs to be filled in with to run that component. A quickjob HTTP 500 usually means the API user's security role is below the component's Level (Datto returns 500 where 403 belongs). The API does not expose component Level; check it in the RMM web UI under the component's settings before blaming the payload.",
+          annotations: { readOnlyHint: true },
           inputSchema: {
             type: "object",
             properties: {
@@ -555,6 +563,7 @@ export function createMcpServer(credentialOverrides?: DattoCredentials): Server 
           name: "datto_get_job",
           description:
             "Get status and details for a quick job by its UID (e.g. queued/running/completed, device count, timestamps). Use this after datto_run_quickjob to check whether the job finished and how it went.",
+          annotations: { readOnlyHint: true },
           inputSchema: {
             type: "object",
             properties: {
@@ -570,6 +579,7 @@ export function createMcpServer(credentialOverrides?: DattoCredentials): Server 
           name: "datto_get_job_components",
           description:
             "Get the components (scripts/actions and their variables) that make up a quick job",
+          annotations: { readOnlyHint: true },
           inputSchema: {
             type: "object",
             properties: {
@@ -585,6 +595,7 @@ export function createMcpServer(credentialOverrides?: DattoCredentials): Server 
           name: "datto_get_job_results",
           description:
             "Get the result of a quick job on one specific device — status, exit code, timing, and error message if it failed. Use datto_get_job first if you need to find which devices the job ran on.",
+          annotations: { readOnlyHint: true },
           inputSchema: {
             type: "object",
             properties: {
@@ -604,6 +615,7 @@ export function createMcpServer(credentialOverrides?: DattoCredentials): Server 
           name: "datto_get_job_stdout",
           description:
             "Get the captured stdout output of a quick job on a specific device. Use this to diagnose what a script actually printed when a quick job's outcome is unclear.",
+          annotations: { readOnlyHint: true },
           inputSchema: {
             type: "object",
             properties: {
@@ -623,6 +635,7 @@ export function createMcpServer(credentialOverrides?: DattoCredentials): Server 
           name: "datto_get_job_stderr",
           description:
             "Get the captured stderr output of a quick job on a specific device. Use this to diagnose why a quick job failed.",
+          annotations: { readOnlyHint: true },
           inputSchema: {
             type: "object",
             properties: {
@@ -642,6 +655,7 @@ export function createMcpServer(credentialOverrides?: DattoCredentials): Server 
           name: "datto_get_device_audit",
           description:
             "Get audit data for a device (hardware, software, OS information)",
+          annotations: { readOnlyHint: true },
           inputSchema: {
             type: "object",
             properties: {
@@ -664,6 +678,7 @@ export function createMcpServer(credentialOverrides?: DattoCredentials): Server 
           name: "datto_get_device_patches",
           description:
             "Get Windows patch installation status for a device - per-patch installed/missing/pending status, severity, reboot requirement, and KB article",
+          annotations: { readOnlyHint: true },
           inputSchema: {
             type: "object",
             properties: {
@@ -679,6 +694,7 @@ export function createMcpServer(credentialOverrides?: DattoCredentials): Server 
           name: "datto_get_site_patches",
           description:
             "Get Windows patch installation status across all devices in a site",
+          annotations: { readOnlyHint: true },
           inputSchema: {
             type: "object",
             properties: {

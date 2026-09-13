@@ -88,6 +88,34 @@ describe("Cloudflare Worker entrypoint", () => {
     expect(names.length).toBeGreaterThan(5);
   });
 
+  it("marks read-only tools with readOnlyHint and leaves mutating tools unannotated", async () => {
+    const res = await mcp({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/list",
+      params: {},
+    });
+    const body = (await res.json()) as {
+      result?: {
+        tools?: {
+          name: string;
+          annotations?: { readOnlyHint?: boolean };
+        }[];
+      };
+    };
+    const tools = body.result?.tools ?? [];
+
+    // Representative read-only tool: annotated true.
+    const listDevices = tools.find((t) => t.name === "datto_list_devices");
+    expect(listDevices?.annotations?.readOnlyHint).toBe(true);
+
+    // Known mutating tool: must NOT carry readOnlyHint. This is the
+    // assertion that guards against a careless future sweep annotating
+    // every tool indiscriminately.
+    const runQuickjob = tools.find((t) => t.name === "datto_run_quickjob");
+    expect(runQuickjob?.annotations?.readOnlyHint).not.toBe(true);
+  });
+
   it("returns a graceful error for a credential-requiring tool when unconfigured", async () => {
     // Ensure no ambient credentials leak in from the test environment.
     vi.stubEnv("DATTO_API_KEY", "");
