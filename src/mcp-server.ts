@@ -424,7 +424,8 @@ export function createMcpServer(credentialOverrides?: DattoCredentials): Server 
         },
         {
           name: "datto_run_quickjob",
-          description: "Run a quick job on a device",
+          description:
+            "Run a quick job on a device. Returns a job UID — pass it to datto_get_job, datto_get_job_components, datto_get_job_results, datto_get_job_stdout, and datto_get_job_stderr to check the job's status and retrieve its output, since this call itself is fire-and-forget.",
           inputSchema: {
             type: "object",
             properties: {
@@ -447,6 +448,93 @@ export function createMcpServer(credentialOverrides?: DattoCredentials): Server 
               },
             },
             required: ["deviceUid", "jobName", "componentUid"],
+          },
+        },
+        {
+          name: "datto_get_job",
+          description:
+            "Get status and details for a quick job by its UID (e.g. queued/running/completed, device count, timestamps). Use this after datto_run_quickjob to check whether the job finished and how it went.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              jobUid: {
+                type: "string",
+                description: "The job UID, returned by datto_run_quickjob",
+              },
+            },
+            required: ["jobUid"],
+          },
+        },
+        {
+          name: "datto_get_job_components",
+          description:
+            "Get the components (scripts/actions and their variables) that make up a quick job",
+          inputSchema: {
+            type: "object",
+            properties: {
+              jobUid: {
+                type: "string",
+                description: "The job UID",
+              },
+            },
+            required: ["jobUid"],
+          },
+        },
+        {
+          name: "datto_get_job_results",
+          description:
+            "Get the result of a quick job on one specific device — status, exit code, timing, and error message if it failed. Use datto_get_job first if you need to find which devices the job ran on.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              jobUid: {
+                type: "string",
+                description: "The job UID",
+              },
+              deviceUid: {
+                type: "string",
+                description: "The device UID to get the job result for",
+              },
+            },
+            required: ["jobUid", "deviceUid"],
+          },
+        },
+        {
+          name: "datto_get_job_stdout",
+          description:
+            "Get the captured stdout output of a quick job on a specific device. Use this to diagnose what a script actually printed when a quick job's outcome is unclear.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              jobUid: {
+                type: "string",
+                description: "The job UID",
+              },
+              deviceUid: {
+                type: "string",
+                description: "The device UID",
+              },
+            },
+            required: ["jobUid", "deviceUid"],
+          },
+        },
+        {
+          name: "datto_get_job_stderr",
+          description:
+            "Get the captured stderr output of a quick job on a specific device. Use this to diagnose why a quick job failed.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              jobUid: {
+                type: "string",
+                description: "The job UID",
+              },
+              deviceUid: {
+                type: "string",
+                description: "The device UID",
+              },
+            },
+            required: ["jobUid", "deviceUid"],
           },
         },
         {
@@ -787,6 +875,68 @@ export function createMcpServer(credentialOverrides?: DattoCredentials): Server 
           return {
             content: [
               { type: "text", text: JSON.stringify(result ?? {}, null, 2) },
+            ],
+          };
+        }
+
+        case "datto_get_job": {
+          const { jobUid } = args as { jobUid: string };
+          const job = await client.jobs.get(jobUid);
+          return {
+            content: [
+              { type: "text", text: JSON.stringify(job ?? {}, null, 2) },
+            ],
+          };
+        }
+
+        case "datto_get_job_components": {
+          const { jobUid } = args as { jobUid: string };
+          const components = await client.jobs.components(jobUid);
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify(components ?? [], null, 2),
+              },
+            ],
+          };
+        }
+
+        case "datto_get_job_results": {
+          const { jobUid, deviceUid } = args as {
+            jobUid: string;
+            deviceUid: string;
+          };
+          const result = await client.jobs.results(jobUid, deviceUid);
+          return {
+            content: [
+              { type: "text", text: JSON.stringify(result ?? {}, null, 2) },
+            ],
+          };
+        }
+
+        case "datto_get_job_stdout": {
+          const { jobUid, deviceUid } = args as {
+            jobUid: string;
+            deviceUid: string;
+          };
+          const stdout = await client.jobs.stdout(jobUid, deviceUid);
+          return {
+            content: [
+              { type: "text", text: JSON.stringify(stdout ?? "", null, 2) },
+            ],
+          };
+        }
+
+        case "datto_get_job_stderr": {
+          const { jobUid, deviceUid } = args as {
+            jobUid: string;
+            deviceUid: string;
+          };
+          const stderr = await client.jobs.stderr(jobUid, deviceUid);
+          return {
+            content: [
+              { type: "text", text: JSON.stringify(stderr ?? "", null, 2) },
             ],
           };
         }

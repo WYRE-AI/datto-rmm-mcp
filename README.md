@@ -101,7 +101,12 @@ Datto RMM uses regional API endpoints. Select the platform that matches your acc
 | `datto_resolve_alert` | Resolve an alert |
 | `datto_list_sites` | List all sites |
 | `datto_get_site` | Get site details |
-| `datto_run_quickjob` | Run a quick job on a device |
+| `datto_run_quickjob` | Run a quick job on a device (returns a job UID for use with the job tools below) |
+| `datto_get_job` | Get status/details for a quick job by UID |
+| `datto_get_job_components` | Get the components that make up a quick job |
+| `datto_get_job_results` | Get a quick job's result for a specific device |
+| `datto_get_job_stdout` | Get a quick job's captured stdout for a specific device |
+| `datto_get_job_stderr` | Get a quick job's captured stderr for a specific device |
 | `datto_get_device_audit` | Get device audit data (full or software only) |
 
 ## Docker
