@@ -342,7 +342,37 @@ interface QuickJobRequestBody {
  * elicitation helpers (`utils/elicitation.ts`) resolve the right server
  * even after await gaps. See `utils/server-ref.ts` for why this matters.
  */
-export function createMcpServer(credentialOverrides?: DattoCredentials): Server {
+/**
+ * Who is calling, when the server is fronted by a gateway that authenticates
+ * end users itself.
+ *
+ * The Datto RMM API has no impersonation: every job records the API account
+ * that created it, never the person who asked for it. On a shared service
+ * account that makes the job history useless for answering "who ran this?" —
+ * every entry names the integration. Carrying the caller's identity into the
+ * job NAME is the only attribution the API allows.
+ *
+ * ADVISORY, not enforced. It affects labelling only, never authorization, and
+ * a deployment without a gateway simply leaves it unset.
+ */
+export interface RequestContext {
+  /** UPN/email of the end user, from the gateway. */
+  callerUpn?: string;
+}
+
+/** Appends ` [upn]` so a job in the Datto console names the human behind it. */
+function attributeJobName(jobName: string, callerUpn?: string): string {
+  if (!callerUpn) return jobName;
+  // Idempotent: a caller that already attributed the name (or a retry) must
+  // not accumulate suffixes.
+  if (jobName.endsWith(`[${callerUpn}]`)) return jobName;
+  return `${jobName} [${callerUpn}]`;
+}
+
+export function createMcpServer(
+  credentialOverrides?: DattoCredentials,
+  requestContext?: RequestContext
+): Server {
   const server = new Server(
     {
       name: "datto-rmm-mcp",
@@ -1021,7 +1051,11 @@ export function createMcpServer(credentialOverrides?: DattoCredentials): Server 
           // of {name, value} pairs the live API actually requires. See the
           // QuickJobRequestBody comment above for why this nesting exists.
           const jobRequest: QuickJobRequestBody = {
-            jobName,
+            // Datto records the API account as the job's creator and offers no
+            // way to override it, so the caller's identity goes in the name -
+            // the one field that reaches the console's activity list. No-op
+            // when no gateway supplied one.
+            jobName: attributeJobName(jobName, requestContext?.callerUpn),
             jobComponent: {
               componentUid,
               variables: Object.entries(variables ?? {}).map(
