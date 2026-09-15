@@ -271,6 +271,9 @@ export function createMcpServer(credentialOverrides?: DattoCredentials): Server 
       capabilities: {
         tools: {},
         resources: {},
+        extensions: {
+          "io.modelcontextprotocol/ui": {},
+        },
       },
     }
   );
@@ -807,11 +810,13 @@ export function createMcpServer(credentialOverrides?: DattoCredentials): Server 
           // MCP Apps: attach the normalized payload the ui:// alert card
           // renders from. Best-effort — a null card just means no UI surface.
           const card = buildAlertCard(alert);
-          const payload = card ? { ...alert, _card: card } : alert;
+          const structuredContent = card ? { ...alert, _card: card } : alert;
+          const summary = card
+            ? `Alert on ${card.device}: ${card.title} (${card.priority}, ${card.status})`
+            : `Alert ${alertUid}: ${alert?.message ?? "no details available"}`;
           return {
-            content: [
-              { type: "text", text: JSON.stringify(payload ?? {}, null, 2) },
-            ],
+            content: [{ type: "text", text: summary }],
+            structuredContent: structuredContent ?? {},
           };
         }
 

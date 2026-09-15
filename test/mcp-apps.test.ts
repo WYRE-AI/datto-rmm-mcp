@@ -198,10 +198,20 @@ describe("MCP Apps alert card", () => {
       );
       expect(res.status).toBe(200);
       const body = (await res.json()) as {
-        result?: { isError?: boolean; content?: { text?: string }[] };
+        result?: {
+          isError?: boolean;
+          content?: { text?: string }[];
+          structuredContent?: Record<string, unknown>;
+        };
       };
       expect(body.result?.isError).toBeFalsy();
-      const payload = JSON.parse(body.result?.content?.[0]?.text ?? "{}");
+      expect(body.result?.content?.[0]?.text).toBe(
+        "Alert on SRV-DC01: Disk Usage (Critical, Open)"
+      );
+      const payload = body.result?.structuredContent as Record<
+        string,
+        unknown
+      >;
       expect(payload.alertUid).toBe(openAlert.alertUid);
       expect(payload.message).toBe(openAlert.message);
       expect(payload._card).toEqual({
