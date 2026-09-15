@@ -198,16 +198,26 @@ describe("MCP Apps alert card", () => {
       );
       expect(res.status).toBe(200);
       const body = (await res.json()) as {
-        result?: { isError?: boolean; content?: { text?: string }[] };
+        result?: {
+          isError?: boolean;
+          content?: { text?: string }[];
+          structuredContent?: Record<string, unknown>;
+        };
       };
       expect(body.result?.isError).toBeFalsy();
       // datto_get_alert is untrusted-content-marked (src/untrusted-content.ts):
-      // its result text is wrapped in a <datto-data> boundary, so pull the
-      // JSON out of the wrapper before parsing it.
-      const rawText = body.result?.content?.[0]?.text ?? "{}";
+      // the human summary in content is wrapped in a <datto-data> boundary.
+      // The raw alert plus _card lives in structuredContent.
+      const rawText = body.result?.content?.[0]?.text ?? "";
       const match = /^<datto-data>\n([\s\S]*)\n<\/datto-data>\n\n/.exec(rawText);
       expect(match).not.toBeNull();
-      const payload = JSON.parse(match?.[1] ?? "{}");
+      expect(match?.[1]).toBe(
+        "Alert on SRV-DC01: Disk Usage (Critical, Open)"
+      );
+      const payload = body.result?.structuredContent as Record<
+        string,
+        unknown
+      >;
       expect(payload.alertUid).toBe(openAlert.alertUid);
       expect(payload.message).toBe(openAlert.message);
       expect(payload._card).toEqual({
