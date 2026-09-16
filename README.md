@@ -47,6 +47,27 @@ MCP server for Datto RMM, enabling Claude to interact with your Datto RMM accoun
 
 This server is designed to work with the [MCP Gateway](https://github.com/wyre-technology/mcp-gateway) which handles authentication and credential management.
 
+#### Attributing jobs to the end user
+
+Datto RMM records the API account that created a job and offers no way to
+override it, so on a shared service account every quick job in the console
+reads as the integration rather than the person who asked for it.
+
+If the gateway sends an `X-Mcp-User-Upn` header, that identity is appended to
+the job name, which is the only field that reaches the console's activity
+list:
+
+```
+Restart Service [someone@example.com]
+```
+
+**Only honoured when `AUTH_MODE=gateway`.** Without a gateway in front, the
+header is whatever the caller chose to send, so attributing a job to it would
+look authoritative while being self-declared. It is advisory labelling in
+either case and never affects authorization. Brackets and control characters
+are stripped from the value, and it is length-capped, so the suffix cannot be
+forged or made to corrupt the name.
+
 ### Local Development
 
 This server's `@wyre-technology/*` dependencies live on the **GitHub Packages** npm

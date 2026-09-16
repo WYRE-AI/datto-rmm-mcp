@@ -137,6 +137,75 @@ describe("quick job attribution", () => {
     expect((capture.body as { jobName: string }).jobName).toBe("Restart Service [a@b.co]");
   });
 
+  it("strips brackets from the UPN, so attribution cannot be forged", async () => {
+    // The suffix is bracket-delimited, so a UPN containing ']' could close it
+    // early and open a second one - "x] [admin@corp" would render as
+    // "Restart Service [x] [admin@corp]" and read as though the admin had run
+    // the job. Needs a compromised or misconfigured gateway to reach here,
+    // but the rendering must not be forgeable regardless.
+    const capture: { body?: unknown } = {};
+    stubQuickJob(capture);
+
+    await runQuickJob(ENV_GATEWAY, {
+      ...GATEWAY_HEADERS,
+      "X-Mcp-User-Upn": "x] [admin@corp",
+    });
+
+    const name = (capture.body as { jobName: string }).jobName;
+    expect(name).toBe("Restart Service [x admin@corp]");
+    // Exactly one attribution suffix, whatever the input claimed.
+    expect(name.match(/]/g)).toHaveLength(1);
+  });
+
+  it("strips control characters from the UPN", async () => {
+    // A newline in a job name corrupts the console's rendering and, since the
+    // same value is logged, can split one log line into two.
+    const capture: { body?: unknown } = {};
+    stubQuickJob(capture);
+
+    await runQuickJob(ENV_GATEWAY, {
+      ...GATEWAY_HEADERS,
+      // Header values cannot carry a raw newline, so this arrives via the
+      // escape the fetch Headers API does permit: a tab and a DEL.
+      "X-Mcp-User-Upn": "a\t@b.co",
+    });
+
+    expect((capture.body as { jobName: string }).jobName).toBe(
+      "Restart Service [a@b.co]"
+    );
+  });
+
+  it("caps an absurdly long UPN rather than letting it dominate the name", async () => {
+    const capture: { body?: unknown } = {};
+    stubQuickJob(capture);
+
+    await runQuickJob(ENV_GATEWAY, {
+      ...GATEWAY_HEADERS,
+      "X-Mcp-User-Upn": `${"a".repeat(500)}@example.com`,
+    });
+
+    const name = (capture.body as { jobName: string }).jobName;
+    const suffix = name.slice(name.indexOf("[") + 1, -1);
+    expect(suffix.length).toBeLessThanOrEqual(64);
+  });
+
+  it("keeps a caller's own bracketed text and adds attribution after it", async () => {
+    // "Job [ticket-12]" is the name the caller chose; the trailing suffix is
+    // always the gateway's attribution. Documented behaviour, not an accident.
+    const capture: { body?: unknown } = {};
+    stubQuickJob(capture);
+
+    await runQuickJob(
+      ENV_GATEWAY,
+      { ...GATEWAY_HEADERS, "X-Mcp-User-Upn": "a@b.co" },
+      "Restart Service [ticket-12]"
+    );
+
+    expect((capture.body as { jobName: string }).jobName).toBe(
+      "Restart Service [ticket-12] [a@b.co]"
+    );
+  });
+
   it("still sends the nested jobComponent shape alongside the attribution", async () => {
     // Guards against the attribution change quietly reverting the payload fix.
     const capture: { body?: unknown } = {};

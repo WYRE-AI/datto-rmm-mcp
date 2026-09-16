@@ -360,15 +360,67 @@ export interface RequestContext {
   callerUpn?: string;
 }
 
-/** Appends ` [upn]` so a job in the Datto console names the human behind it. */
-function attributeJobName(jobName: string, callerUpn?: string): string {
-  if (!callerUpn) return jobName;
-  // Idempotent: a caller that already attributed the name (or a retry) must
-  // not accumulate suffixes.
-  if (jobName.endsWith(`[${callerUpn}]`)) return jobName;
-  return `${jobName} [${callerUpn}]`;
+/** Longest UPN carried into a job name. Real ones are far shorter; this only
+ *  stops a malformed value from dominating the console's activity list. */
+const MAX_CALLER_UPN_LENGTH = 64;
+
+/**
+ * Makes a gateway-supplied UPN safe to embed in a job name.
+ *
+ * Square brackets are removed, and that is the part that matters. The
+ * attribution suffix is bracket-delimited, so a UPN containing `]` could
+ * close it early and open a second one - `x] [admin@corp` would render as
+ * `Job [x] [admin@corp]` and read as though the admin had run the job. It
+ * would also defeat the idempotency check below. Real UPNs never contain
+ * brackets, so removing them costs nothing.
+ *
+ * Control characters go too (they corrupt the console's rendering and this
+ * log line), and the result is capped.
+ *
+ * @param raw - UPN as received from the gateway, if any.
+ * @returns A UPN safe to embed, or undefined if nothing usable remains.
+ */
+function sanitizeCallerUpn(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  // eslint-disable-next-line no-control-regex
+  const cleaned = raw.replace(/[\x00-\x1f\x7f[\\\]]/g, "").trim();
+  if (!cleaned) return undefined;
+  return cleaned.slice(0, MAX_CALLER_UPN_LENGTH);
 }
 
+/**
+ * Appends ` [upn]` so a job in the Datto console names the human behind it.
+ *
+ * The suffix is always the gateway's own attribution and always last. A
+ * caller-supplied name that already ends in some other bracketed text keeps
+ * it and gains the attribution after it (`Job [ticket-12] [someone@corp]`) -
+ * that text is part of the name the caller chose, not a competing claim about
+ * who ran the job.
+ *
+ * @param jobName - Name as supplied by the caller.
+ * @param callerUpn - Sanitized caller identity, if the gateway supplied one.
+ * @returns The job name, attributed when a caller is known.
+ */
+function attributeJobName(jobName: string, callerUpn?: string): string {
+  const upn = sanitizeCallerUpn(callerUpn);
+  if (!upn) return jobName;
+  // Idempotent: a retry, or a caller that already attributed the name, must
+  // not accumulate duplicate suffixes.
+  if (jobName.endsWith(`[${upn}]`)) return jobName;
+  return `${jobName} [${upn}]`;
+}
+
+/**
+ * Creates an MCP server instance for a single request.
+ *
+ * @param credentialOverrides - Datto credentials for this request. Supplied
+ * per request in gateway mode; falls back to the process environment
+ * otherwise.
+ * @param requestContext - Caller identity from the gateway, used to attribute
+ * created quick jobs. Labelling only - never authorization.
+ * @returns A configured server, to be connected to a transport and closed
+ * when the request completes.
+ */
 export function createMcpServer(
   credentialOverrides?: DattoCredentials,
   requestContext?: RequestContext
