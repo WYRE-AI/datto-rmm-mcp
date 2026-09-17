@@ -14,7 +14,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import worker from "../worker.js";
 
-const DATTO_HOST = "https://concord-api.centrastage.net";
 const ENV_GATEWAY = { AUTH_MODE: "gateway" };
 const ENV_ENV_CREDS = { DATTO_API_KEY: "test-key", DATTO_API_SECRET: "test-secret" };
 
