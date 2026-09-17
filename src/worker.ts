@@ -125,7 +125,15 @@ export default {
       // so elicitation helpers resolve *this* request's server even after
       // await gaps, and never a concurrent request's — see
       // utils/server-ref.ts.
-      const server = createMcpServer(credOverrides);
+      // Gateway-supplied end-user identity, used to attribute created jobs to
+      // the person rather than to the shared API account. Only trusted in
+      // gateway mode: without a gateway in front, this header is whatever the
+      // caller chose to send.
+      const callerUpn = isGatewayMode
+        ? request.headers.get("X-Mcp-User-Upn") ?? undefined
+        : undefined;
+
+      const server = createMcpServer(credOverrides, { callerUpn });
       const transport = new WebStandardStreamableHTTPServerTransport({
         sessionIdGenerator: undefined,
         enableJsonResponse: true,
