@@ -19,6 +19,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import {
   DattoRmmClient,
+  type Component,
   type Device,
   type Platform,
   type QuickJobRequest,
@@ -215,6 +216,48 @@ export async function findDevicesByHostname(
         portalUrl: raw.portalUrl,
       };
     });
+}
+
+// ---------------------------------------------------------------------------
+// Component catalogue
+// ---------------------------------------------------------------------------
+
+/**
+ * The published `@wyre-ai/node-datto-rmm@1.1.0` `Component` type is a
+ * good-faith guess at the `GET /v2/account/components` response shape and
+ * doesn't declare `level` at all — even though it's the field that matters
+ * most operationally. Datto RMM gates which components an API user's
+ * security role may run against a per-component security Level, and the
+ * gate failure comes back as an opaque HTTP 500 rather than a 403, so a
+ * caller needs `level` to diagnose that *before* hitting it. The type's
+ * `category` field is similarly unconfirmed against the live API, so both
+ * `category` and `categoryCode` are read defensively (see RawDevice above
+ * for the same pattern).
+ */
+type RawComponent = Component & {
+  categoryCode?: string;
+  level?: string;
+  securityLevel?: string;
+};
+
+/** Component summary returned by datto_list_components. */
+export interface ComponentMatch {
+  uid: string;
+  name: string;
+  description?: string;
+  category?: string;
+  level?: string;
+}
+
+function toComponentMatch(component: Component): ComponentMatch {
+  const raw = component as RawComponent;
+  return {
+    uid: component.uid,
+    name: component.name,
+    description: component.description,
+    category: raw.category ?? raw.categoryCode,
+    level: raw.level ?? raw.securityLevel,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -420,6 +463,26 @@ export function createMcpServer(credentialOverrides?: DattoCredentials): Server 
               },
             },
             required: ["siteUid"],
+          },
+        },
+        {
+          name: "datto_list_components",
+          description:
+            "List components (the scripts/monitors available to run as quick jobs) in the account, optionally filtered by a case-insensitive substring of the name. Use this to find a componentUid for datto_run_quickjob — otherwise there's no way to get one short of the Datto RMM web UI. Each result includes `level`, the component's security Level: compare it against the API user's own security role before calling datto_run_quickjob, because a role below the component's Level does not fail with a 403 — Datto returns an opaque HTTP 500 instead, which looks like an unrelated server error unless you know to check Level first.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              name: {
+                type: "string",
+                description:
+                  'Case-insensitive substring filter on component name, e.g. "disk" or "cleanup". Applied across every page of the account\'s component catalogue before truncating to max, so a match on a later page isn\'t missed.',
+              },
+              max: {
+                type: "number",
+                description: "Maximum number of results (default: 50)",
+                default: 50,
+              },
+            },
           },
         },
         {
@@ -841,6 +904,49 @@ export function createMcpServer(credentialOverrides?: DattoCredentials): Server 
           const site = await client.sites.get(siteUid);
           return {
             content: [{ type: "text", text: JSON.stringify(site, null, 2) }],
+          };
+        }
+
+        case "datto_list_components": {
+          const params = args as { name?: string; max?: number };
+          const max = params.max || 50;
+          const nameFilter = params.name?.trim().toLowerCase();
+
+          let matches: Component[];
+          let totalMatched: number;
+
+          if (nameFilter) {
+            // Filter across every page before truncating — otherwise a
+            // match on (say) page 5 of the catalogue would be missed just
+            // because non-matching components on earlier pages filled max.
+            const allMatches: Component[] = [];
+            for await (const component of client.account.componentsAll()) {
+              if (component.name?.toLowerCase().includes(nameFilter)) {
+                allMatches.push(component);
+              }
+            }
+            totalMatched = allMatches.length;
+            matches = allMatches.slice(0, max);
+          } else {
+            matches = await collectItems(client.account.componentsAll(), max);
+            totalMatched = matches.length;
+          }
+
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify(
+                  {
+                    totalMatched,
+                    returned: matches.length,
+                    components: matches.map(toComponentMatch),
+                  },
+                  null,
+                  2
+                ),
+              },
+            ],
           };
         }
 
