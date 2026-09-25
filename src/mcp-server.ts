@@ -224,29 +224,60 @@ export async function findDevicesByHostname(
 
 /**
  * The published `@wyre-ai/node-datto-rmm@1.1.0` `Component` type is a
- * good-faith guess at the `GET /v2/account/components` response shape and
- * doesn't declare `level` at all — even though it's the field that matters
- * most operationally. Datto RMM gates which components an API user's
- * security role may run against a per-component security Level, and the
- * gate failure comes back as an opaque HTTP 500 rather than a 403, so a
- * caller needs `level` to diagnose that *before* hitting it. The type's
- * `category` field is similarly unconfirmed against the live API, so both
- * `category` and `categoryCode` are read defensively (see RawDevice above
- * for the same pattern).
+ * good-faith guess at the `GET /v2/account/components` response shape, not
+ * a verified spec. Confirmed live against a real account (2026-09-26,
+ * `GET /account/components?max=250`, 250+ components inspected): every
+ * component has exactly `id`, `credentialsRequired`, `uid`, `name`,
+ * `description`, `categoryCode`, `variables` — there is no `level` or
+ * `category` field at all. Datto does not expose a component's security
+ * Level over this endpoint (see the tool description for what that means
+ * for diagnosing datto_run_quickjob failures). `category` is kept as a
+ * defensive fallback in case a differently-configured account or API
+ * version ever sends it instead (see `RawDevice` above for the same
+ * pattern), but `categoryCode` is what the live API actually returns.
+ *
+ * The SDK doesn't declare `variables` on `Component` at all, and its shape
+ * isn't documented anywhere in the SDK's types, so each entry is read
+ * defensively field-by-field in toComponentVariableSummary below.
  */
 type RawComponent = Component & {
   categoryCode?: string;
-  level?: string;
-  securityLevel?: string;
+  credentialsRequired?: boolean;
+  variables?: unknown[];
 };
+
+/**
+ * Compact summary of one of a component's expected input variables — what
+ * datto_run_quickjob's `variables` map needs to be filled in with to run
+ * this component. The SDK doesn't type this shape, so every field is read
+ * defensively and only included when present.
+ */
+export interface ComponentVariableSummary {
+  name?: string;
+  type?: string;
+  defaultValue?: string;
+  description?: string;
+}
+
+function toComponentVariableSummary(raw: unknown): ComponentVariableSummary {
+  const v = (raw ?? {}) as Record<string, unknown>;
+  const summary: ComponentVariableSummary = {};
+  if (typeof v.name === "string") summary.name = v.name;
+  if (typeof v.type === "string") summary.type = v.type;
+  const defaultValue = v.defaultValue ?? v.default ?? v.value;
+  if (typeof defaultValue === "string") summary.defaultValue = defaultValue;
+  if (typeof v.description === "string") summary.description = v.description;
+  return summary;
+}
 
 /** Component summary returned by datto_list_components. */
 export interface ComponentMatch {
   uid: string;
   name: string;
   description?: string;
-  category?: string;
-  level?: string;
+  categoryCode?: string;
+  credentialsRequired?: boolean;
+  variables?: ComponentVariableSummary[];
 }
 
 function toComponentMatch(component: Component): ComponentMatch {
@@ -255,8 +286,11 @@ function toComponentMatch(component: Component): ComponentMatch {
     uid: component.uid,
     name: component.name,
     description: component.description,
-    category: raw.category ?? raw.categoryCode,
-    level: raw.level ?? raw.securityLevel,
+    categoryCode: raw.categoryCode ?? raw.category,
+    credentialsRequired: raw.credentialsRequired,
+    variables: Array.isArray(raw.variables)
+      ? raw.variables.map(toComponentVariableSummary)
+      : undefined,
   };
 }
 
@@ -468,7 +502,7 @@ export function createMcpServer(credentialOverrides?: DattoCredentials): Server 
         {
           name: "datto_list_components",
           description:
-            "List components (the scripts/monitors available to run as quick jobs) in the account, optionally filtered by a case-insensitive substring of the name. Use this to find a componentUid for datto_run_quickjob — otherwise there's no way to get one short of the Datto RMM web UI. Each result includes `level`, the component's security Level: compare it against the API user's own security role before calling datto_run_quickjob, because a role below the component's Level does not fail with a 403 — Datto returns an opaque HTTP 500 instead, which looks like an unrelated server error unless you know to check Level first.",
+            "List components (the scripts/monitors available to run as quick jobs) in the account, optionally filtered by a case-insensitive substring of the name. Use this to find a componentUid for datto_run_quickjob — otherwise there's no way to get one short of the Datto RMM web UI. Each result's `variables` lists what datto_run_quickjob's `variables` map needs to be filled in with to run that component. A quickjob HTTP 500 usually means the API user's security role is below the component's Level (Datto returns 500 where 403 belongs). The API does not expose component Level; check it in the RMM web UI under the component's settings before blaming the payload.",
           inputSchema: {
             type: "object",
             properties: {

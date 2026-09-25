@@ -7,6 +7,12 @@
  * hand — datto_get_job_components only works retroactively, on a job that
  * has already run.
  *
+ * The stubbed responses below use the real `GET /account/components` shape,
+ * confirmed live against a real Datto RMM account (2026-09-26,
+ * `?max=250`, 250+ components inspected): every component has exactly
+ * `id`, `credentialsRequired`, `uid`, `name`, `description`, `categoryCode`,
+ * `variables` — there is no `level` or `category` field.
+ *
  * Follows the same technique as job-tools.test.ts: drive a real
  * tools/call round-trip through the actual Worker `fetch` entrypoint with
  * only the network boundary (the Datto RMM host) stubbed.
@@ -49,8 +55,14 @@ async function resultJson(res: Response): Promise<{
     uid: string;
     name: string;
     description?: string;
-    category?: string;
-    level?: string;
+    categoryCode?: string;
+    credentialsRequired?: boolean;
+    variables?: {
+      name?: string;
+      type?: string;
+      defaultValue?: string;
+      description?: string;
+    }[];
   }[];
 }> {
   const body = (await res.json()) as {
@@ -94,33 +106,48 @@ function jsonResponse(body: unknown): Response {
 const PAGE_1_URL = `${DATTO_HOST}/api/v2/account/components`;
 const PAGE_2_URL = `${DATTO_HOST}/api/v2/account/components?page=2`;
 
-/** A two-page catalogue. The "Disk Cleanup" component only shows up on page 2. */
+/**
+ * A two-page catalogue matching the live response shape. The
+ * "Disk Cleanup [WIN]" component only shows up on page 2, and carries a
+ * `variables` entry — the input datto_run_quickjob needs filled in.
+ */
 function stubTwoPageCatalogue() {
   stubFetch((url) => {
     if (url === PAGE_1_URL) {
       return jsonResponse({
-        pageDetails: { count: 1, totalCount: 2, nextPageUrl: PAGE_2_URL },
+        pageDetails: { count: 1, prevPageUrl: null, nextPageUrl: PAGE_2_URL },
         components: [
           {
+            id: 111,
             uid: "component-restart",
             name: "Restart Service",
             description: "Restarts a Windows service",
-            category: "Maintenance",
-            level: "Standard",
+            categoryCode: "scripts",
+            credentialsRequired: false,
+            variables: [
+              {
+                name: "ServiceName",
+                type: "string",
+                defaultValue: "Spooler",
+                description: "The Windows service name to restart",
+              },
+            ],
           },
         ],
       });
     }
     if (url === PAGE_2_URL) {
       return jsonResponse({
-        pageDetails: { count: 1, totalCount: 2, nextPageUrl: null },
+        pageDetails: { count: 1, prevPageUrl: PAGE_1_URL, nextPageUrl: null },
         components: [
           {
+            id: 222,
             uid: "component-disk-cleanup",
-            name: "Disk Cleanup",
+            name: "Disk Cleanup [WIN]",
             description: "Frees up disk space",
-            category: "Maintenance",
-            level: "Advanced",
+            categoryCode: "scripts",
+            credentialsRequired: true,
+            variables: [],
           },
         ],
       });
@@ -130,7 +157,7 @@ function stubTwoPageCatalogue() {
 }
 
 describe("datto_list_components", () => {
-  it("is listed in tools/list with a description that explains the 500-vs-Level diagnosis", async () => {
+  it("is listed in tools/list with a description that explains the 500-vs-403 diagnosis", async () => {
     const res = await worker.fetch(
       new Request("http://worker.local/mcp", {
         method: "POST",
@@ -170,7 +197,7 @@ describe("datto_list_components", () => {
     expect(returned).toBe(1);
     expect(components).toHaveLength(1);
     expect(components[0].uid).toBe("component-disk-cleanup");
-    expect(components[0].name).toBe("Disk Cleanup");
+    expect(components[0].name).toBe("Disk Cleanup [WIN]");
   });
 
   it("matches case-insensitively regardless of the filter's own casing", async () => {
@@ -186,8 +213,8 @@ describe("datto_list_components", () => {
   it("applies the name filter across all pages, not just the first", async () => {
     stubTwoPageCatalogue();
 
-    // "Disk Cleanup" only exists on page 2 — a filter that stopped after
-    // page 1 would miss it entirely.
+    // "Disk Cleanup [WIN]" only exists on page 2 — a filter that stopped
+    // after page 1 would miss it entirely.
     const res = await call("datto_list_components", { name: "cleanup" });
     const { totalMatched, components } = await resultJson(res);
 
@@ -199,19 +226,19 @@ describe("datto_list_components", () => {
     stubFetch((url) => {
       if (url === PAGE_1_URL) {
         return jsonResponse({
-          pageDetails: { count: 2, totalCount: 4, nextPageUrl: PAGE_2_URL },
+          pageDetails: { count: 2, prevPageUrl: null, nextPageUrl: PAGE_2_URL },
           components: [
-            { uid: "c1", name: "Alpha Cleanup", level: "Standard" },
-            { uid: "c2", name: "Beta Cleanup", level: "Standard" },
+            { id: 1, uid: "c1", name: "Alpha Cleanup", categoryCode: "scripts" },
+            { id: 2, uid: "c2", name: "Beta Cleanup", categoryCode: "scripts" },
           ],
         });
       }
       if (url === PAGE_2_URL) {
         return jsonResponse({
-          pageDetails: { count: 2, totalCount: 4, nextPageUrl: null },
+          pageDetails: { count: 2, prevPageUrl: PAGE_1_URL, nextPageUrl: null },
           components: [
-            { uid: "c3", name: "Gamma Cleanup", level: "Advanced" },
-            { uid: "c4", name: "Delta Cleanup", level: "Advanced" },
+            { id: 3, uid: "c3", name: "Gamma Cleanup", categoryCode: "monitors" },
+            { id: 4, uid: "c4", name: "Delta Cleanup", categoryCode: "monitors" },
           ],
         });
       }
@@ -234,9 +261,14 @@ describe("datto_list_components", () => {
     stubFetch((url) => {
       if (url === PAGE_1_URL) {
         return jsonResponse({
-          pageDetails: { count: 1, totalCount: 1, nextPageUrl: null },
+          pageDetails: { count: 1, prevPageUrl: null, nextPageUrl: null },
           components: [
-            { uid: "c1", name: "Restart Service", level: "Standard" },
+            {
+              id: 1,
+              uid: "c1",
+              name: "Restart Service",
+              categoryCode: "scripts",
+            },
           ],
         });
       }
@@ -264,7 +296,7 @@ describe("datto_list_components", () => {
     stubFetch((url) => {
       if (url === PAGE_1_URL) {
         return jsonResponse({
-          pageDetails: { count: 0, totalCount: 0, nextPageUrl: null },
+          pageDetails: { count: 0, prevPageUrl: null, nextPageUrl: null },
           components: [],
         });
       }
@@ -279,7 +311,18 @@ describe("datto_list_components", () => {
     expect(components).toEqual([]);
   });
 
-  it("includes level (and category) in every returned component", async () => {
+  it("does not return a `level` field (the live API never sends one)", async () => {
+    stubTwoPageCatalogue();
+
+    const res = await call("datto_list_components", {});
+    const { components } = await resultJson(res);
+
+    for (const component of components) {
+      expect(component).not.toHaveProperty("level");
+    }
+  });
+
+  it("includes categoryCode and credentialsRequired for every returned component", async () => {
     stubTwoPageCatalogue();
 
     const res = await call("datto_list_components", {});
@@ -287,28 +330,26 @@ describe("datto_list_components", () => {
 
     expect(components).toHaveLength(2);
     for (const component of components) {
-      expect(component.level).toBeTruthy();
-      expect(component.category).toBeTruthy();
+      expect(component.categoryCode).toBe("scripts");
+      expect(typeof component.credentialsRequired).toBe("boolean");
     }
-    expect(components.find((c) => c.uid === "component-restart")?.level).toBe(
-      "Standard"
-    );
     expect(
-      components.find((c) => c.uid === "component-disk-cleanup")?.level
-    ).toBe("Advanced");
+      components.find((c) => c.uid === "component-disk-cleanup")
+        ?.credentialsRequired
+    ).toBe(true);
   });
 
-  it("falls back to categoryCode when the API uses that spelling instead of category", async () => {
+  it("falls back to `category` when the API sends that spelling instead of categoryCode", async () => {
     stubFetch((url) => {
       if (url === PAGE_1_URL) {
         return jsonResponse({
-          pageDetails: { count: 1, totalCount: 1, nextPageUrl: null },
+          pageDetails: { count: 1, prevPageUrl: null, nextPageUrl: null },
           components: [
             {
+              id: 1,
               uid: "c1",
               name: "Something",
-              categoryCode: "SECURITY",
-              level: "Guru",
+              category: "SECURITY",
             },
           ],
         });
@@ -318,7 +359,32 @@ describe("datto_list_components", () => {
 
     const res = await call("datto_list_components", {});
     const { components } = await resultJson(res);
-    expect(components[0].category).toBe("SECURITY");
-    expect(components[0].level).toBe("Guru");
+    expect(components[0].categoryCode).toBe("SECURITY");
+  });
+
+  it("returns a compact variables summary for datto_run_quickjob (variables example)", async () => {
+    stubTwoPageCatalogue();
+
+    const res = await call("datto_list_components", { name: "restart" });
+    const { components } = await resultJson(res);
+
+    expect(components).toHaveLength(1);
+    expect(components[0].variables).toEqual([
+      {
+        name: "ServiceName",
+        type: "string",
+        defaultValue: "Spooler",
+        description: "The Windows service name to restart",
+      },
+    ]);
+  });
+
+  it("returns an empty variables array for a component with no expected variables", async () => {
+    stubTwoPageCatalogue();
+
+    const res = await call("datto_list_components", { name: "disk" });
+    const { components } = await resultJson(res);
+
+    expect(components[0].variables).toEqual([]);
   });
 });
