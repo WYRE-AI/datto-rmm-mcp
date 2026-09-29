@@ -23,6 +23,7 @@ RUN echo "@wyre-ai:registry=https://npm.pkg.github.com" > .npmrc && \
     echo "@wyre-technology:registry=https://npm.pkg.github.com" >> .npmrc && \
     echo "//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}" >> .npmrc && \
     npm ci --ignore-scripts && \
+    npm audit signatures && \
     rm -f .npmrc
 
 # Copy source code
