@@ -201,7 +201,13 @@ describe("MCP Apps alert card", () => {
         result?: { isError?: boolean; content?: { text?: string }[] };
       };
       expect(body.result?.isError).toBeFalsy();
-      const payload = JSON.parse(body.result?.content?.[0]?.text ?? "{}");
+      // datto_get_alert is untrusted-content-marked (src/untrusted-content.ts):
+      // its result text is wrapped in a <datto-data> boundary, so pull the
+      // JSON out of the wrapper before parsing it.
+      const rawText = body.result?.content?.[0]?.text ?? "{}";
+      const match = /^<datto-data>\n([\s\S]*)\n<\/datto-data>\n\n/.exec(rawText);
+      expect(match).not.toBeNull();
+      const payload = JSON.parse(match?.[1] ?? "{}");
       expect(payload.alertUid).toBe(openAlert.alertUid);
       expect(payload.message).toBe(openAlert.message);
       expect(payload._card).toEqual({

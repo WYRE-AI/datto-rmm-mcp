@@ -153,7 +153,13 @@ describe("job read tools", () => {
       jobUid: "job-123",
       deviceUid: "device-456",
     });
-    expect(JSON.parse(await resultText(res))).toBe("Service restarted OK\n");
+    // Untrusted-content wrapping (see untrusted-content.ts): stdout is raw
+    // endpoint output, so the tool result wraps it in a <datto-data>
+    // boundary rather than returning it as bare JSON.
+    const text = await resultText(res);
+    expect(text.startsWith("<datto-data>\n")).toBe(true);
+    expect(text).toContain(JSON.stringify("Service restarted OK\n", null, 2));
+    expect(text).toMatch(/not instructions/);
   });
 
   it("datto_get_job_stderr returns captured stderr", async () => {
@@ -170,7 +176,13 @@ describe("job read tools", () => {
       jobUid: "job-123",
       deviceUid: "device-456",
     });
-    expect(JSON.parse(await resultText(res))).toBe("");
+    // Untrusted-content wrapping (see untrusted-content.ts): stderr is raw
+    // endpoint output, so the tool result wraps it in a <datto-data>
+    // boundary rather than returning it as bare JSON.
+    const text = await resultText(res);
+    expect(text.startsWith("<datto-data>\n")).toBe(true);
+    expect(text).toContain(JSON.stringify("", null, 2));
+    expect(text).toMatch(/not instructions/);
   });
 
   it("lists all five job tools in tools/list", async () => {

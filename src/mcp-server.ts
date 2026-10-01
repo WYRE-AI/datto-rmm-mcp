@@ -35,6 +35,10 @@ import {
 } from "./alert-card.js";
 import { ALERT_CARD_HTML } from "./generated/alert-card-html.js";
 import { getDevicePatches, getSitePatches } from "./patches.js";
+import {
+  applyUntrustedContentMarkers,
+  type ToolResultLike,
+} from "./untrusted-content.js";
 
 // ---------------------------------------------------------------------------
 // Credentials
@@ -742,7 +746,11 @@ export function createMcpServer(credentialOverrides?: DattoCredentials): Server 
 
     const client = createClient(creds);
 
-    try {
+    // Every branch below returns raw tool output; wrapping happens once,
+    // after this IIFE settles, via applyUntrustedContentMarkers — see
+    // untrusted-content.ts for why and for which tools.
+    const result = await (async (): Promise<ToolResultLike> => {
+      try {
       switch (name) {
         case "datto_list_devices": {
           const params = args as { siteUid?: string; max?: number };
@@ -1130,13 +1138,16 @@ export function createMcpServer(credentialOverrides?: DattoCredentials): Server 
             isError: true,
           };
       }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      return {
-        content: [{ type: "text", text: `Error: ${message}` }],
-        isError: true,
-      };
-    }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return {
+          content: [{ type: "text", text: `Error: ${message}` }],
+          isError: true,
+        };
+      }
+    })();
+
+    return applyUntrustedContentMarkers(name, result);
   });
 
   return server;

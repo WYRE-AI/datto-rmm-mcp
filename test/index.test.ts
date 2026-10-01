@@ -258,6 +258,16 @@ describe('Datto RMM MCP Server', () => {
       });
     });
 
+    // datto_find_device is one of the untrusted-content-marked tools (see
+    // src/untrusted-content.ts): its real result text is wrapped in a
+    // <datto-data> boundary, so tests that inspect the underlying JSON parse
+    // out of that wrapper first rather than JSON.parse-ing the whole thing.
+    function parseWrappedResult(text: string): unknown {
+      const match = /^<datto-data>\n([\s\S]*)\n<\/datto-data>\n\n/.exec(text);
+      expect(match).not.toBeNull();
+      return JSON.parse(match![1]);
+    }
+
     describe('datto_find_device', () => {
       // Raw Datto RMM API device payloads (the SDK returns them verbatim)
       const rawDevices = [
@@ -323,7 +333,7 @@ describe('Datto RMM MCP Server', () => {
           expect.objectContaining({ hostname: 'app-hv-host06' })
         );
 
-        const payload = JSON.parse(result.content[0].text);
+        const payload = parseWrappedResult(result.content[0].text) as any;
         expect(payload.count).toBe(1);
         expect(payload.devices[0]).toEqual({
           uid: 'uid-host06',
@@ -343,7 +353,7 @@ describe('Datto RMM MCP Server', () => {
 
         const result = await callFindDevice({ hostname: 'app-hv-host06' });
 
-        const payload = JSON.parse(result.content[0].text);
+        const payload = parseWrappedResult(result.content[0].text) as any;
         expect(payload.count).toBe(1);
         expect(payload.devices[0].uid).toBe('uid-host06');
       });
@@ -356,7 +366,7 @@ describe('Datto RMM MCP Server', () => {
           exactMatch: false,
         });
 
-        const payload = JSON.parse(result.content[0].text);
+        const payload = parseWrappedResult(result.content[0].text) as any;
         expect(payload.count).toBe(2);
       });
 
@@ -369,7 +379,7 @@ describe('Datto RMM MCP Server', () => {
           max: 1,
         });
 
-        const payload = JSON.parse(result.content[0].text);
+        const payload = parseWrappedResult(result.content[0].text) as any;
         expect(payload.count).toBe(1);
       });
 
@@ -387,7 +397,7 @@ describe('Datto RMM MCP Server', () => {
         );
         expect(mockAccountDevices).not.toHaveBeenCalled();
 
-        const payload = JSON.parse(result.content[0].text);
+        const payload = parseWrappedResult(result.content[0].text) as any;
         expect(payload.count).toBe(1);
       });
 
