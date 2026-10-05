@@ -47,6 +47,27 @@ MCP server for Datto RMM, enabling Claude to interact with your Datto RMM accoun
 
 This server is designed to work with the [MCP Gateway](https://github.com/wyre-technology/mcp-gateway) which handles authentication and credential management.
 
+#### Attributing jobs to the end user
+
+Datto RMM records the API account that created a job and offers no way to
+override it, so on a shared service account every quick job in the console
+reads as the integration rather than the person who asked for it.
+
+If the gateway sends an `X-Mcp-User-Upn` header, that identity is appended to
+the job name, which is the only field that reaches the console's activity
+list:
+
+```
+Restart Service [someone@example.com]
+```
+
+**Only honoured when `AUTH_MODE=gateway`.** Without a gateway in front, the
+header is whatever the caller chose to send, so attributing a job to it would
+look authoritative while being self-declared. It is advisory labelling in
+either case and never affects authorization. Brackets and control characters
+are stripped from the value, and it is length-capped, so the suffix cannot be
+forged or made to corrupt the name.
+
 ### Local Development
 
 This server's `@wyre-technology/*` dependencies live on the **GitHub Packages** npm
@@ -91,24 +112,32 @@ Datto RMM uses regional API endpoints. Select the platform that matches your acc
 
 ## Available Tools
 
-| Tool | Description |
-|------|-------------|
-| `datto_list_devices` | List devices with optional site filter |
-| `datto_find_device` | Find a device by hostname (exact or partial match) and resolve its UID |
-| `datto_get_device` | Get device details by UID |
-| `datto_list_alerts` | List open alerts with optional site filter |
-| `datto_get_alert` | Get alert details by UID (renders as an interactive card in MCP Apps hosts) |
-| `datto_resolve_alert` | Resolve an alert |
-| `datto_list_sites` | List all sites |
-| `datto_get_site` | Get site details |
-| `datto_list_components` | List components (find a componentUid and its expected `variables` for datto_run_quickjob), optionally by name substring |
-| `datto_run_quickjob` | Run a quick job on a device (returns a job UID for use with the job tools below) |
-| `datto_get_job` | Get status/details for a quick job by UID |
-| `datto_get_job_components` | Get the components that make up a quick job |
-| `datto_get_job_results` | Get a quick job's result for a specific device |
-| `datto_get_job_stdout` | Get a quick job's captured stdout for a specific device |
-| `datto_get_job_stderr` | Get a quick job's captured stderr for a specific device |
-| `datto_get_device_audit` | Get device audit data (full or software only) |
+Tools that only read data from Datto RMM carry `annotations: { readOnlyHint: true }`
+in their `tools/list` definition. Clients that support this MCP hint (e.g.
+Microsoft 365 Copilot / Copilot Studio) can use it to skip the per-call
+confirmation prompt for those tools. Tools that create, update, resolve, or
+run anything are never annotated as read-only.
+
+| Tool | Description | Read-only |
+|------|-------------|-----------|
+| `datto_list_devices` | List devices with optional site filter | Yes |
+| `datto_find_device` | Find a device by hostname (exact or partial match) and resolve its UID | Yes |
+| `datto_get_device` | Get device details by UID | Yes |
+| `datto_list_alerts` | List open alerts with optional site filter | Yes |
+| `datto_get_alert` | Get alert details by UID (renders as an interactive card in MCP Apps hosts) | Yes |
+| `datto_resolve_alert` | Resolve an alert | No |
+| `datto_list_sites` | List all sites | Yes |
+| `datto_get_site` | Get site details | Yes |
+| `datto_list_components` | List components (find a componentUid and its expected `variables` for datto_run_quickjob), optionally by name substring | Yes |
+| `datto_run_quickjob` | Run a quick job on a device (returns a job UID for use with the job tools below) | No |
+| `datto_get_job` | Get status/details for a quick job by UID | Yes |
+| `datto_get_job_components` | Get the components that make up a quick job | Yes |
+| `datto_get_job_results` | Get a quick job's result for a specific device | Yes |
+| `datto_get_job_stdout` | Get a quick job's captured stdout for a specific device | Yes |
+| `datto_get_job_stderr` | Get a quick job's captured stderr for a specific device | Yes |
+| `datto_get_device_audit` | Get device audit data (full or software only) | Yes |
+| `datto_get_device_patches` | Get Windows patch installation status for a device | Yes |
+| `datto_get_site_patches` | Get Windows patch installation status across all devices in a site | Yes |
 
 ## Docker
 
