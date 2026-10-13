@@ -1,4 +1,10 @@
 services:
+  # Gateway mode. Datto API key and secret arrive per request on
+  # X-Datto-API-Key and X-Datto-API-Secret. Do not set DATTO_API_KEY,
+  # DATTO_API_SECRET, or env_file here — that would put static vendor
+  # credentials in the container. The project .env is used only for Compose
+  # interpolation of CONDUIT_S2S_SECRET. For AUTH_MODE=env, pass DATTO_API_KEY
+  # and DATTO_API_SECRET on that process instead (see the README).
   datto-rmm-mcp:
     build:
       context: .
@@ -8,15 +14,14 @@ services:
     container_name: datto-rmm-mcp-server
     restart: unless-stopped
     ports:
-      - "8080:8080"
-    env_file:
-      - .env
+      - "127.0.0.1:8080:8080"
     environment:
-      - DATTO_API_KEY=${DATTO_API_KEY}
-      - DATTO_API_SECRET=${DATTO_API_SECRET}
-      - DATTO_PLATFORM=${DATTO_PLATFORM}
       - MCP_TRANSPORT=http
-      - AUTH_MODE=env
+      # Inside the container. Host publish above is loopback. Honored because
+      # CONDUIT_S2S_SECRET is required; the insecure-dev bypass cannot bind this.
+      - MCP_HTTP_HOST=0.0.0.0
+      - AUTH_MODE=gateway
+      - CONDUIT_S2S_SECRET=${CONDUIT_S2S_SECRET:?set CONDUIT_S2S_SECRET}
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - NODE_ENV=production
     healthcheck:

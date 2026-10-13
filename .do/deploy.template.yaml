@@ -25,6 +25,11 @@ spec:
     - key: NODE_ENV
       value: "production"
       scope: RUN_TIME
+    # HTTP startup refuses to listen without this. Generate with
+    # `openssl rand -hex 32`. A known placeholder is rejected.
+    - key: CONDUIT_S2S_SECRET
+      type: SECRET
+      scope: RUN_TIME
     - key: DATTO_API_KEY
       type: SECRET
       scope: RUN_AND_BUILD_TIME

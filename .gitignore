@@ -21,6 +21,7 @@ npm-debug.log*
 # Environment
 .env
 .env.*
+!.env.example
 
 # Test coverage
 coverage/

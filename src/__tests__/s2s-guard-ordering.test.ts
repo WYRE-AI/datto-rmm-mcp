@@ -21,6 +21,8 @@
  */
 import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
 import { createHmac } from 'node:crypto';
+import type { Server } from 'node:http';
+import { startHttpTransport } from '../index.js';
 
 const TEST_PORT = 47006;
 const TEST_SECRET = 'test-s2s-guard-ordering-secret-do-not-use-in-prod';
@@ -28,6 +30,7 @@ const DATTO_HOST = 'https://concord-api.centrastage.net';
 
 let tokenCalls = 0;
 let sitesCalls = 0;
+let httpServer: Server | undefined;
 
 const realFetch = globalThis.fetch;
 
@@ -65,12 +68,16 @@ beforeAll(async () => {
   process.env.MCP_HTTP_PORT = String(TEST_PORT);
   process.env.MCP_HTTP_HOST = '127.0.0.1';
   process.env.CONDUIT_S2S_SECRET = TEST_SECRET;
-  await import('../index.js');
+  httpServer = await startHttpTransport();
   await waitForServerReady();
 });
 
-afterAll(() => {
+afterAll(async () => {
   globalThis.fetch = realFetch;
+  if (!httpServer?.listening) return;
+  await new Promise<void>((resolve, reject) => {
+    httpServer?.close((err) => (err ? reject(err) : resolve()));
+  });
 });
 
 function mintS2sHeader(secret: string, unixSeconds: number): string {
