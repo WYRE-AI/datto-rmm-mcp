@@ -20,6 +20,8 @@ MCP server for Datto RMM, enabling Claude to interact with your Datto RMM accoun
 >      (Workers → Settings → Build → Variables and Secrets).
 >    - **DigitalOcean App Platform** → set an encrypted env var named **`GITHUB_TOKEN`**
 >      with scope **Build Time** to your PAT (the `.do/deploy.template.yaml` already declares it).
+>      Also set a runtime secret **`CONDUIT_S2S_SECRET`** (`openssl rand -hex 32`).
+>      HTTP exits if that value is missing or a known placeholder.
 
 [![Deploy to DO](https://www.deploytodo.com/do-btn-blue.svg)](https://cloud.digitalocean.com/apps/new?repo=https://github.com/WYRE-AI/datto-rmm-mcp/tree/main)
 
@@ -46,6 +48,8 @@ MCP server for Datto RMM, enabling Claude to interact with your Datto RMM accoun
 ### Via MCP Gateway (Recommended)
 
 This server is designed to work with the [MCP Gateway](https://github.com/wyre-technology/mcp-gateway) which handles authentication and credential management.
+
+On HTTP, the gateway proves it is the caller with `X-Gateway-S2S`. The value is `t=<unix seconds>,v1=<hex hmac-sha256>`. The MAC is HMAC-SHA256 over the ASCII string `t=<unix seconds>` (the same prefix that appears in the header), keyed with `CONDUIT_S2S_SECRET`. The timestamp must be within 300 seconds of the server clock. A missing or invalid header is `401`. The secret is never written to logs.
 
 #### Attributing jobs to the end user
 
@@ -87,15 +91,29 @@ reads the token from `NODE_AUTH_TOKEN`, so no further config is needed.
 
 ## Configuration
 
-The server accepts credentials via environment variables:
+Copy [`.env.example`](.env.example). Stdio and `AUTH_MODE=env` read vendor credentials from the environment. Gateway mode does not.
 
-| Variable | Description |
-|----------|-------------|
-| `DATTO_API_KEY` | Your Datto RMM API key |
-| `DATTO_API_SECRET` | Your Datto RMM API secret |
-| `DATTO_PLATFORM` | API platform: `pinotage`, `merlot`, `concord`, `vidal`, `zinfandel`, or `syrah` (default: `concord`) |
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `DATTO_API_KEY` | For stdio and `AUTH_MODE=env` | Datto RMM API key |
+| `DATTO_API_SECRET` | For stdio and `AUTH_MODE=env` | Datto RMM API secret |
+| `DATTO_PLATFORM` | No | API platform: `pinotage`, `merlot`, `concord` (default), `vidal`, `zinfandel`, or `syrah` |
+| `MCP_TRANSPORT` | No | `stdio` (default) or `http` |
+| `AUTH_MODE` | No | `env` (image default) or `gateway` (Compose default). Gateway mode requires `X-Datto-API-Key` and `X-Datto-API-Secret` on each `/mcp` request and never falls back to `DATTO_*`. `env` uses those variables only after S2S auth succeeds. |
+| `CONDUIT_S2S_SECRET` | Yes for HTTP | Service-to-service secret. The HTTP server logs an error and exits non-zero when this is empty or a known placeholder (`changeme`, `placeholder`, `your-s2s-secret`, `replace-with-a-real-secret`, and the other example values in code). Compose will not start without it. Never commit a real value. Generate one with `openssl rand -hex 32`. |
+| `MCP_ALLOW_INSECURE_DEV` | No | Set to exactly `1` only for local development to start HTTP without `CONDUIT_S2S_SECRET`. The process logs a warning and does not enforce `X-Gateway-S2S`. The listener is forced to `127.0.0.1`. A non-loopback `MCP_HTTP_HOST` (including `0.0.0.0`) refuses to start. A known placeholder still refuses to start; unset the secret to use this bypass. |
+| `MCP_HTTP_HOST` | No | Bind address when `MCP_TRANSPORT=http`. With a real `CONDUIT_S2S_SECRET`, this is honored and defaults to `0.0.0.0` when unset, so container deploys stay unchanged. The container image sets `0.0.0.0`. |
+| `MCP_HTTP_PORT` | No | HTTP port. Defaults to `8080`. |
 
-When used with the MCP Gateway, credentials are injected via `X_API_KEY` and `X_API_SECRET` environment variables.
+`/health` stays unauthenticated and does not read credentials. The stdio transport does not use `CONDUIT_S2S_SECRET`.
+
+When used with the MCP Gateway in single-tenant `AUTH_MODE=env`, credentials may also be injected via `X_API_KEY` and `X_API_SECRET` environment variables. That path still requires a valid `X-Gateway-S2S` header on HTTP.
+
+### HTTP authentication
+
+With `MCP_TRANSPORT=http` and `CONDUIT_S2S_SECRET` set, every `/mcp` request must include `X-Gateway-S2S: t=<unix seconds>,v1=<hex hmac-sha256 of the string t=...>`. A missing or invalid header returns 401 before any vendor credential is read.
+
+In `AUTH_MODE=gateway`, `/mcp` also requires `X-Datto-API-Key` and `X-Datto-API-Secret` (`X-Datto-Platform` is optional). Those headers are the only credential source for that request. A request missing them returns 401 and does not fall back to `DATTO_API_KEY` / `DATTO_API_SECRET`.
 
 ### Platform Selection
 
@@ -143,17 +161,37 @@ run anything are never annotated as read-only.
 
 ### Use the prebuilt image (no build, no token)
 
+The image listens on `0.0.0.0` inside the container (`MCP_HTTP_HOST`) and defaults to `AUTH_MODE=env`. Publish the port on loopback and pass the S2S secret. HTTP refuses to start when `CONDUIT_S2S_SECRET` is empty or a known placeholder.
+
 ```bash
 docker pull ghcr.io/wyre-ai/datto-rmm-mcp:latest
 
-docker run -p 8080:8080 \
+docker run \
+  -e CONDUIT_S2S_SECRET="$CONDUIT_S2S_SECRET" \
   -e DATTO_API_KEY=xxx \
   -e DATTO_API_SECRET=xxx \
   -e DATTO_PLATFORM=concord \
+  -p 127.0.0.1:8080:8080 \
   ghcr.io/wyre-ai/datto-rmm-mcp:latest
 ```
 
 The image is public and pulls anonymously, so this path needs no GitHub token at all.
+
+Gateway mode does not read those vendor variables. Credentials arrive on each request, and the request must also carry `X-Gateway-S2S` signed with `CONDUIT_S2S_SECRET`:
+
+```bash
+docker run \
+  -e CONDUIT_S2S_SECRET="$CONDUIT_S2S_SECRET" \
+  -e AUTH_MODE=gateway \
+  -p 127.0.0.1:8080:8080 \
+  ghcr.io/wyre-ai/datto-rmm-mcp:latest
+```
+
+Compose refuses to start when `CONDUIT_S2S_SECRET` is unset, sets `AUTH_MODE=gateway`, does not inject `DATTO_API_KEY` or `DATTO_API_SECRET`, and publishes `127.0.0.1:8080:8080`:
+
+```bash
+CONDUIT_S2S_SECRET="$CONDUIT_S2S_SECRET" docker compose up
+```
 
 ### Build from source
 
@@ -166,10 +204,12 @@ requires a token even though the package is public (see
 ```bash
 docker build --build-arg GITHUB_TOKEN=$(gh auth token) -t datto-rmm-mcp .
 
-docker run -p 8080:8080 \
+docker run \
+  -e CONDUIT_S2S_SECRET="$CONDUIT_S2S_SECRET" \
   -e DATTO_API_KEY=xxx \
   -e DATTO_API_SECRET=xxx \
   -e DATTO_PLATFORM=concord \
+  -p 127.0.0.1:8080:8080 \
   datto-rmm-mcp
 ```
 
@@ -177,8 +217,16 @@ The token is written to a temporary `.npmrc` that is deleted in the same layer, 
 it is never baked into the image.
 
 > [!NOTE]
-> The image defaults to `MCP_TRANSPORT=http` on port 8080, so `-p 8080:8080` is
-> required to reach it. Health check: `curl http://localhost:8080/health`.
+> The image defaults to `MCP_TRANSPORT=http` on port 8080. Publish it on loopback
+> (`-p 127.0.0.1:8080:8080`) unless a proxy sits in front. Health check:
+> `curl http://127.0.0.1:8080/health` (no credentials). HTTP will not start until
+> `CONDUIT_S2S_SECRET` is a real secret.
+
+Local HTTP without a secret is development-only. It binds `127.0.0.1` and logs a warning. A non-loopback `MCP_HTTP_HOST` makes startup exit:
+
+```bash
+MCP_TRANSPORT=http MCP_ALLOW_INSECURE_DEV=1 npm start
+```
 
 ## License
 
