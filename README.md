@@ -153,6 +153,7 @@ run anything are never annotated as read-only.
 | `datto_get_job_results` | Get a quick job's result for a specific device | Yes |
 | `datto_get_job_stdout` | Get a quick job's captured stdout for a specific device | Yes |
 | `datto_get_job_stderr` | Get a quick job's captured stderr for a specific device | Yes |
+| `datto_list_device_jobs` | List recent job runs on a device (newest first, optional date window and name filter) to find a job UID for the job tools above. Needs the API user's Audit: View permission | Yes |
 | `datto_get_device_audit` | Get device audit data (full or software only) | Yes |
 | `datto_get_device_patches` | Get Windows patch installation status for a device | Yes |
 | `datto_get_site_patches` | Get Windows patch installation status across all devices in a site | Yes |

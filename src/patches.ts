@@ -117,11 +117,30 @@ export interface PatchesResponse {
   patches: Patch[];
 }
 
-async function fetchPatches(creds: DattoCredentials, path: string): Promise<PatchesResponse> {
+/**
+ * Authenticated GET against a Datto RMM v2 endpoint the SDK doesn't wrap (or
+ * wraps incorrectly), sharing this module's per-credential token cache.
+ *
+ * `pathOrUrl` is either an API path (`/v2/...`) or a full URL the API itself
+ * handed back for paging (`pageDetails.nextPageUrl`). A full URL must point
+ * at this credential set's own platform API - the bearer token is never sent
+ * to any other host, whatever a response body says.
+ */
+export async function dattoApiGet<T>(creds: DattoCredentials, pathOrUrl: string): Promise<T> {
   const apiUrl = PLATFORM_URLS[creds.platform];
+  let url: string;
+  if (/^https?:\/\//i.test(pathOrUrl)) {
+    if (!pathOrUrl.startsWith(`${apiUrl}/api/`)) {
+      throw new Error("Refusing to follow a Datto RMM paging URL outside the configured platform API");
+    }
+    url = pathOrUrl;
+  } else {
+    url = `${apiUrl}/api${pathOrUrl}`;
+  }
+
   const token = await getAccessToken(creds);
 
-  const response = await fetch(`${apiUrl}/api${path}`, {
+  const response = await fetch(url, {
     headers: { Authorization: `Bearer ${token}` },
   });
 
@@ -132,13 +151,13 @@ async function fetchPatches(creds: DattoCredentials, path: string): Promise<Patc
     // re-authenticate because of one unrelated 401.
     tokenCache.delete(tokenCacheKey(creds));
     const retryToken = await getAccessToken(creds);
-    const retryResponse = await fetch(`${apiUrl}/api${path}`, {
+    const retryResponse = await fetch(url, {
       headers: { Authorization: `Bearer ${retryToken}` },
     });
     if (!retryResponse.ok) {
       throw new Error(`Datto RMM API error: ${retryResponse.status} ${retryResponse.statusText}`);
     }
-    return (await retryResponse.json()) as PatchesResponse;
+    return (await retryResponse.json()) as T;
   }
 
   if (!response.ok) {
@@ -146,7 +165,11 @@ async function fetchPatches(creds: DattoCredentials, path: string): Promise<Patc
     throw new Error(`Datto RMM API error: ${response.status} ${response.statusText} - ${body}`);
   }
 
-  return (await response.json()) as PatchesResponse;
+  return (await response.json()) as T;
+}
+
+function fetchPatches(creds: DattoCredentials, path: string): Promise<PatchesResponse> {
+  return dattoApiGet<PatchesResponse>(creds, path);
 }
 
 export function getDevicePatches(creds: DattoCredentials, deviceUid: string): Promise<PatchesResponse> {
