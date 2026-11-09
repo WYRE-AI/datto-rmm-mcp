@@ -35,8 +35,10 @@
  * `componentResults[].componentName`). Recurring jobs reuse ONE job.uid for
  * every run, and that endpoint only holds the most recent run (verified live:
  * `ranOn` matched the newest of two runs). So a result is attached only to the
- * row whose deployment time matches its `ranOn`; older runs say so instead of
- * borrowing the latest run's outcome.
+ * deployment it came from - the newest deployment at or before its `ranOn`,
+ * which also covers runs that start long after deployment. Older runs say
+ * their output was replaced; runs that can't be matched say the outcome is
+ * unknown. Neither borrows the latest run's outcome.
  */
 
 import type { DattoCredentials } from "./mcp-server.js";
@@ -53,7 +55,9 @@ const PAGE_SIZE = 100;
 const MAX_PAGES = 10;
 /** Hard cap on per-job results lookups per call. */
 const MAX_RESULT_LOOKUPS = 50;
-/** How close a result's `ranOn` must be to a row's deployment time to belong to it. */
+/** Clock-skew tolerance when comparing a result's `ranOn` with deployment
+ *  times and with the window's `until` (live, `ranOn` sits a few hundred ms
+ *  BEFORE the activity row's timestamp). */
 const RAN_ON_MATCH_MS = 5 * 60 * 1000;
 
 /** Datto RMM device UIDs are GUIDs; anything else can't be one, and is never
@@ -363,6 +367,25 @@ export async function listDeviceJobs(
   const windowReachesNow = now.getTime() - until.getTime() <= RAN_ON_MATCH_MS;
   const seenJob = new Set<string>();
 
+  // Timed results are matched to deployments by boundaries, not by a fixed
+  // window around the deployment time (a run can start well after it was
+  // deployed): a result belongs to the newest deployment of that job at or
+  // before its `ranOn`. `accepted` is newest first, so that is the first
+  // row per job with deployedAt <= ranOn. The match is only certain when no
+  // later deployment can hide outside the window: either the window reaches
+  // now, or the run itself happened before the window ends.
+  for (const jobUid of new Set(accepted.map((c) => c.jobUid))) {
+    await resultFor(jobUid);
+  }
+  const matchedRow = new Map<string, Candidate>();
+  for (const c of accepted) {
+    if (matchedRow.has(c.jobUid) || c.timeMs === undefined) continue;
+    const l = results.get(c.jobUid);
+    const ran = l?.kind === "ok" ? ranOnMs(l.result.ranOn) : undefined;
+    if (ran !== undefined && c.timeMs <= ran + RAN_ON_MATCH_MS) matchedRow.set(c.jobUid, c);
+  }
+  const matchIsCertain = (ran: number) => windowReachesNow || ran <= until.getTime() + RAN_ON_MATCH_MS;
+
   const jobs: DeviceJobRun[] = [];
   let olderRunWithoutStatus = false;
   let lookupFailed = false;
@@ -371,6 +394,7 @@ export async function listDeviceJobs(
     const isNewestForJob = !seenJob.has(c.jobUid);
     seenJob.add(c.jobUid);
     const result = lookup.kind === "ok" ? lookup.result : undefined;
+    const matched = matchedRow.get(c.jobUid);
     const run: DeviceJobRun = {
       jobUid: c.jobUid,
       jobName: c.jobName,
@@ -384,7 +408,7 @@ export async function listDeviceJobs(
     if (names.length > 0) run.componentNames = names;
 
     const ran = ranOnMs(result?.ranOn);
-    if (result && ran !== undefined && c.timeMs !== undefined && Math.abs(ran - c.timeMs) <= RAN_ON_MATCH_MS) {
+    if (result && ran !== undefined && matched === c && matchIsCertain(ran)) {
       run.status = result.jobDeploymentStatus;
       run.ranOn = new Date(ran).toISOString();
       run.components = (result.componentResults ?? []).map((cr) => ({
@@ -409,10 +433,20 @@ export async function listDeviceJobs(
         run.statusNote =
           "The job's latest result has no run time yet, so it can't be matched to this run; this run's outcome is unknown.";
       }
+    } else if (c.timeMs === undefined) {
+      run.statusNote = "This run has no deployment time, so the job's stored result can't be matched to it; outcome unknown.";
+    } else if (c.timeMs > ran + RAN_ON_MATCH_MS) {
+      run.statusNote =
+        "Deployed after the job's stored result ran, so this run hasn't reported a result yet (or it is still pending); outcome unknown.";
+    } else if (!matchIsCertain(ran)) {
+      run.statusNote =
+        "The job's stored result is from a run after this window ends, so it can't be matched to a run here; outcome unknown.";
     } else {
+      // A newer deployment of this job (the matched row) has run since, and
+      // Datto keeps only the latest result - so this run's is gone.
       olderRunWithoutStatus = true;
       run.statusNote =
-        "Earlier run of a recurring job: Datto RMM stores results only for the latest run, so this run's outcome and output are no longer available.";
+        "Earlier run of a recurring job: a later run has replaced it, and Datto RMM stores results only for the latest run, so this run's outcome and output are no longer available.";
     }
 
     jobs.push(run);

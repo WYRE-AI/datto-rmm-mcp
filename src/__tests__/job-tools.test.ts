@@ -300,6 +300,20 @@ describe("datto_list_device_jobs", () => {
     return body.result?.content?.[0]?.text ?? "";
   }
 
+  // Job names can embed the hostname, so this tool's output is wrapped as
+  // untrusted data (see untrusted-content.ts). Shadows the file-level
+  // resultText: asserts the <datto-data> boundary, returns the JSON inside.
+  async function resultText(res: Response): Promise<string> {
+    const body = (await res.json()) as {
+      result?: { content?: { text?: string }[]; isError?: boolean };
+    };
+    expect(body.result?.isError).toBeFalsy();
+    const text = body.result?.content?.[0]?.text ?? "";
+    expect(text.startsWith("<datto-data>\n")).toBe(true);
+    expect(text).toMatch(/not instructions/);
+    return text.slice("<datto-data>\n".length, text.indexOf("\n</datto-data>"));
+  }
+
   it("lists job runs newest first, with outcome only on the run the stored result belongs to", async () => {
     let activityUrl = "";
     stubFetch((url) => {
@@ -366,10 +380,9 @@ describe("datto_list_device_jobs", () => {
     expect(earlier.statusNote).toMatch(/latest run/);
     expect(out.notes.join(" ")).toMatch(/LATEST run/);
 
-    // Not a device-shaped payload: no untrusted-content wrapper, no hostname.
-    const text = JSON.stringify(out);
-    expect(text).not.toContain('"hostname"');
-    expect(text).not.toContain("datto-data");
+    // The activity row's hostname field isn't passed through (the quick
+    // job's name still embeds it, hence the untrusted-content wrapper).
+    expect(JSON.stringify(out)).not.toContain('"hostname"');
   });
 
   it("looks up each job's result once, however many runs it has", async () => {
@@ -549,6 +562,50 @@ describe("datto_list_device_jobs", () => {
       )
     );
     expect(past.jobs.map((j: { status?: string }) => j.status)).toEqual([undefined, undefined]);
+  });
+
+  it("matches a result to its deployment by boundaries, not a fixed window", async () => {
+    let activities: unknown[] = [];
+    let ranOnS = 0;
+    stubFetch((url) => {
+      if (url.startsWith(ACTIVITY_PREFIX)) {
+        return jsonResponse({ pageDetails: { nextPageUrl: null }, activities });
+      }
+      if (url.includes("/results/")) return result(RECURRING, ranOnS, "Daily component");
+      return undefined;
+    });
+    const list = async (args: Record<string, unknown>) =>
+      JSON.parse(await resultText(await call("datto_list_device_jobs", { deviceUid: DEVICE, ...args })));
+
+    // Delayed execution: the only deployment ran 6 minutes later. Its result
+    // is current, not an overwritten earlier run.
+    activities = [activity({ jobUid: RECURRING, jobName: "Daily", dateS: LATEST_RUN_S })];
+    ranOnS = LATEST_RUN_S + 360;
+    const delayed = await list({ since: "2026-11-01", until: "2026-11-09" });
+    expect(delayed.jobs[0].status).toBe("Success");
+    expect(delayed.jobs[0].ranOn).toBe(new Date(ranOnS * 1000).toISOString());
+
+    // The newest deployment hasn't reported yet; the stored result belongs
+    // to the previous one.
+    activities = [
+      activity({ jobUid: RECURRING, jobName: "Daily", dateS: LATEST_RUN_S }),
+      activity({ jobUid: RECURRING, jobName: "Daily", dateS: EARLIER_RUN_S }),
+    ];
+    ranOnS = EARLIER_RUN_S + 30;
+    const pending = await list({ since: "2026-11-01", until: "2026-11-09" });
+    expect(pending.jobs[0].status).toBeUndefined();
+    expect(pending.jobs[0].statusNote).toMatch(/Deployed after the job's stored result ran/);
+    expect(pending.jobs[1].status).toBe("Success");
+
+    // A historical window whose result ran after the window ends: a later
+    // deployment outside the window may own it, so nothing is claimed -
+    // neither a status nor "output gone".
+    ranOnS = LATEST_RUN_S + 2 * 86400;
+    const historical = await list({ since: "2026-11-01", until: "2026-11-08T22:00:00Z" });
+    expect(historical.jobs.map((j: { status?: string }) => j.status)).toEqual([undefined, undefined]);
+    expect(historical.jobs[0].statusNote).toMatch(/after this window ends/);
+    expect(historical.jobs[1].statusNote).toMatch(/after this window ends/);
+    expect((historical.notes ?? []).join(" ")).not.toMatch(/LATEST run/);
   });
 
   it("reports a failed results lookup instead of treating it as 'no stored result'", async () => {

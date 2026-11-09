@@ -72,6 +72,8 @@ const REASONS: Record<string, string> = {
     "Hostnames are set on the device itself, so a compromised or malicious endpoint can name itself anything, including text designed to look like an instruction.",
   datto_get_device_audit:
     "Installed-software names come from whatever is actually installed, including malware that names itself deceptively — this reflects what the endpoint reports about itself, not a vetted source.",
+  datto_list_device_jobs:
+    "Job names can embed the device's hostname (Datto names quick jobs \"QuickJob running component X on device <hostname>\"), and a compromised endpoint can name itself anything, including text designed to look like an instruction.",
 };
 
 const DEFAULT_REASON =
@@ -95,12 +97,6 @@ const DEFAULT_REASON =
  *   short RMM-agent diagnostic (e.g. "component timed out"), not captured
  *   process output — unlike stdout/stderr, it is not a channel for
  *   arbitrary endpoint text.
- * - `datto_list_device_jobs`: returns job and component names (set by RMM
- *   users, or by the API caller that created the job), RMM status enums and
- *   timestamps — the same kind of values as `datto_get_job` /
- *   `datto_get_job_results`. It deliberately does not pass through the
- *   activity row's hostname or raw `details`, and never returns stdout/
- *   stderr, so nothing it emits is text the endpoint chose.
  * - `datto_run_quickjob` / `datto_resolve_alert`: these return a vendor
  *   acknowledgement (a new job UID, a resolved status) — not content
  *   shaped by a device.
@@ -121,6 +117,7 @@ export const UNTRUSTED_CONTENT_TOOLS: ReadonlySet<string> = new Set([
   "datto_get_device_audit",
   "datto_get_job_stdout",
   "datto_get_job_stderr",
+  "datto_list_device_jobs",
 ]);
 
 /** `DATTO_UNTRUSTED_MARKERS=off` (case-insensitive) disables wrapping. */
