@@ -155,8 +155,14 @@ function toApiDate(d: Date): string {
   return d.toISOString().replace(/\.\d{3}Z$/, "Z");
 }
 
+/** A date-time with no `Z` / `±hh:mm` offset. JS would read it in the host's
+ *  local zone; the tool promises UTC, so `Z` is appended. Date-only strings
+ *  are already parsed as UTC by `Date`. */
+const OFFSET_FREE_DATE_TIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?$/;
+
 function parseDateInput(value: string, field: string): Date {
-  const d = new Date(value);
+  const trimmed = value.trim();
+  const d = new Date(OFFSET_FREE_DATE_TIME_RE.test(trimmed) ? `${trimmed}Z` : trimmed);
   if (Number.isNaN(d.getTime())) {
     throw new Error(`${field} must be an ISO 8601 date or date-time, e.g. 2026-11-01 or 2026-11-01T09:00:00Z`);
   }
@@ -197,6 +203,26 @@ function startedBy(user: ActivityLog["user"]): string | undefined {
   if (!user) return undefined;
   const full = [user.firstName, user.lastName].filter(Boolean).join(" ").trim();
   return str(user.userName) ?? (full || undefined);
+}
+
+/** Outcome of one `/results/{deviceUid}` lookup. */
+type Lookup =
+  | { kind: "ok"; result: JobResults }
+  /** 404 or an empty body: Datto holds no result for this job/device. */
+  | { kind: "missing" }
+  /** Any other failure (permission, rate limit, server, network). */
+  | { kind: "failed"; message: string }
+  /** Not attempted: per-call lookup cap reached. */
+  | { kind: "skipped" };
+
+/** The SDK throws `DattoRmmNotFoundError` (statusCode 404) for a missing
+ *  resource; duck-typed so a test stub or SDK upgrade needn't share the class. */
+function isNotFound(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { statusCode?: unknown }).statusCode === 404
+  );
 }
 
 interface Candidate {
@@ -240,30 +266,38 @@ export async function listDeviceJobs(
   const nameFilter = options.name?.trim().toLowerCase() || undefined;
   const notes: string[] = [];
 
-  // Per-job results, fetched at most once each and capped per call.
-  const results = new Map<string, JobResults | null>();
+  // Per-job results, fetched at most once each and capped per call. A 404
+  // means Datto holds no result; any other failure (403, 429, 5xx, network)
+  // is kept apart so it is reported, never mistaken for "no result".
+  const results = new Map<string, Lookup>();
   let lookups = 0;
   let lookupCapHit = false;
-  const resultFor = async (jobUid: string): Promise<JobResults | null | undefined> => {
-    if (results.has(jobUid)) return results.get(jobUid);
+  const resultFor = async (jobUid: string): Promise<Lookup> => {
+    const cached = results.get(jobUid);
+    if (cached) return cached;
     if (lookups >= MAX_RESULT_LOOKUPS) {
       lookupCapHit = true;
-      return undefined;
+      return { kind: "skipped" };
     }
     lookups++;
+    let lookup: Lookup;
     try {
       const raw = (await getResult(jobUid)) as JobResults | undefined;
-      results.set(jobUid, raw && typeof raw === "object" ? raw : null);
-    } catch {
-      // A job whose results Datto no longer holds still belongs in the list.
-      results.set(jobUid, null);
+      lookup = raw && typeof raw === "object" ? { kind: "ok", result: raw } : { kind: "missing" };
+    } catch (error) {
+      lookup = isNotFound(error)
+        ? { kind: "missing" }
+        : { kind: "failed", message: error instanceof Error ? error.message : String(error) };
     }
-    return results.get(jobUid);
+    results.set(jobUid, lookup);
+    return lookup;
   };
-  const componentNamesOf = (r: JobResults | null | undefined): string[] =>
-    (r?.componentResults ?? [])
+  const componentNamesOf = (l: Lookup): string[] =>
+    (l.kind === "ok" ? (l.result.componentResults ?? []) : [])
       .map((c) => c.componentName)
       .filter((n): n is string => typeof n === "string" && n.length > 0);
+  // Jobs a name filter could not be checked against (lookup failed/skipped).
+  const uncheckedByFilter = new Set<string>();
 
   const query = new URLSearchParams({
     categories: "job",
@@ -301,8 +335,12 @@ export async function listDeviceJobs(
       if (nameFilter && !candidate.jobName?.toLowerCase().includes(nameFilter)) {
         // Job names often differ from the component they run (scheduled
         // jobs), so fall back to the component names from the job's result.
-        const names = componentNamesOf(await resultFor(jobUid));
-        if (!names.some((n) => n.toLowerCase().includes(nameFilter))) continue;
+        const lookup = await resultFor(jobUid);
+        if (lookup.kind === "failed" || lookup.kind === "skipped") {
+          uncheckedByFilter.add(jobUid);
+          continue;
+        }
+        if (!componentNamesOf(lookup).some((n) => n.toLowerCase().includes(nameFilter))) continue;
       }
 
       accepted.push(candidate);
@@ -318,10 +356,21 @@ export async function listDeviceJobs(
     );
   }
 
+  // An untimed result (pending/running) can only be pinned to a deployment
+  // when the window reaches the present: then the first (newest) row for
+  // that job is its latest deployment. Older rows, or a historical window
+  // that may exclude the latest deployment, get no borrowed status.
+  const windowReachesNow = now.getTime() - until.getTime() <= RAN_ON_MATCH_MS;
+  const seenJob = new Set<string>();
+
   const jobs: DeviceJobRun[] = [];
   let olderRunWithoutStatus = false;
+  let lookupFailed = false;
   for (const c of accepted) {
-    const result = await resultFor(c.jobUid);
+    const lookup = await resultFor(c.jobUid);
+    const isNewestForJob = !seenJob.has(c.jobUid);
+    seenJob.add(c.jobUid);
+    const result = lookup.kind === "ok" ? lookup.result : undefined;
     const run: DeviceJobRun = {
       jobUid: c.jobUid,
       jobName: c.jobName,
@@ -331,7 +380,7 @@ export async function listDeviceJobs(
       startedBy: startedBy(c.row.user),
     };
 
-    const names = componentNamesOf(result);
+    const names = componentNamesOf(lookup);
     if (names.length > 0) run.componentNames = names;
 
     const ran = ranOnMs(result?.ranOn);
@@ -345,13 +394,21 @@ export async function listDeviceJobs(
         hasStdOut: cr.hasStdOut,
         hasStdErr: cr.hasStdErr,
       }));
-    } else if (result === undefined) {
+    } else if (lookup.kind === "skipped") {
       run.statusNote = "Not looked up (per-call results lookup limit reached).";
-    } else if (result === null) {
+    } else if (lookup.kind === "missing") {
       run.statusNote = "Datto RMM returned no stored result for this job on this device.";
+    } else if (lookup.kind === "failed") {
+      lookupFailed = true;
+      run.statusNote = `Results lookup failed, so this run's outcome is unknown: ${lookup.message}`;
     } else if (ran === undefined) {
-      run.status = result.jobDeploymentStatus;
-      run.statusNote = "Result has no run time yet (job may be pending or running).";
+      if (isNewestForJob && windowReachesNow) {
+        run.status = result?.jobDeploymentStatus;
+        run.statusNote = "Result has no run time yet (job may be pending or running).";
+      } else {
+        run.statusNote =
+          "The job's latest result has no run time yet, so it can't be matched to this run; this run's outcome is unknown.";
+      }
     } else {
       olderRunWithoutStatus = true;
       run.statusNote =
@@ -369,7 +426,15 @@ export async function listDeviceJobs(
   if (lookupCapHit) {
     notes.push(`Results were looked up for at most ${MAX_RESULT_LOOKUPS} jobs this call; some rows have no status or component names.`);
   }
-  if (jobs.length === 0) {
+  if (lookupFailed) {
+    notes.push("Some results lookups failed (see statusNote); those runs' outcomes are unknown, not missing.");
+  }
+  if (uncheckedByFilter.size > 0) {
+    notes.push(
+      `Incomplete search: ${uncheckedByFilter.size} job(s) whose name didn't match could not be checked against the component-name filter because their results lookup failed or hit the per-call limit. Retry, or narrow since/until.`
+    );
+  }
+  if (jobs.length === 0 && uncheckedByFilter.size === 0) {
     notes.push(
       nameFilter
         ? `No job runs matching "${options.name}" on this device between since and until.`

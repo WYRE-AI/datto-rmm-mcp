@@ -518,6 +518,103 @@ describe("datto_list_device_jobs", () => {
     expect(text).toMatch(/search backend unavailable/);
   });
 
+  it("gives an untimed (pending/running) result only to the newest run, and only when the window reaches now", async () => {
+    const nowS = Math.floor(Date.now() / 1000);
+    const rows = (latestS: number) => [
+      activity({ jobUid: RECURRING, jobName: "Daily", dateS: latestS }),
+      activity({ jobUid: RECURRING, jobName: "Daily", dateS: latestS - 86400 }),
+    ];
+    let activityRows = rows(nowS - 60);
+    stubFetch((url) => {
+      if (url.startsWith(ACTIVITY_PREFIX)) {
+        return jsonResponse({ pageDetails: { nextPageUrl: null }, activities: activityRows });
+      }
+      if (url.includes("/results/")) {
+        return jsonResponse({ jobUid: RECURRING, deviceUid: DEVICE, ranOn: null, jobDeploymentStatus: "Running", componentResults: [] });
+      }
+      return undefined;
+    });
+
+    // Default window (until = now): newest row is the latest deployment.
+    const live = JSON.parse(await resultText(await call("datto_list_device_jobs", { deviceUid: DEVICE })));
+    expect(live.jobs[0].status).toBe("Running");
+    expect(live.jobs[1].status).toBeUndefined();
+    expect(live.jobs[1].statusNote).toMatch(/can't be matched/);
+
+    // Historical window: its newest row may not be the latest deployment.
+    activityRows = rows(LATEST_RUN_S);
+    const past = JSON.parse(
+      await resultText(
+        await call("datto_list_device_jobs", { deviceUid: DEVICE, since: "2026-11-01", until: "2026-11-05" })
+      )
+    );
+    expect(past.jobs.map((j: { status?: string }) => j.status)).toEqual([undefined, undefined]);
+  });
+
+  it("reports a failed results lookup instead of treating it as 'no stored result'", async () => {
+    stubFetch((url) => {
+      if (url.startsWith(ACTIVITY_PREFIX)) {
+        return jsonResponse({
+          pageDetails: { nextPageUrl: null },
+          activities: [activity({ jobUid: QUICK, jobName: "Weekly maintenance", dateS: QUICK_RUN_S })],
+        });
+      }
+      if (url.includes("/results/")) {
+        return new Response(JSON.stringify({ message: "missing scope" }), {
+          status: 403,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return undefined;
+    });
+
+    const unfiltered = JSON.parse(await resultText(await call("datto_list_device_jobs", { deviceUid: DEVICE })));
+    expect(unfiltered.jobs[0].statusNote).toMatch(/Results lookup failed/);
+    expect(unfiltered.jobs[0].statusNote).not.toMatch(/no stored result/);
+    expect(unfiltered.notes.join(" ")).toMatch(/lookups failed/);
+
+    // With a component-name filter the job can't be checked: say the search
+    // is incomplete rather than "No job runs matching".
+    const filtered = JSON.parse(
+      await resultText(await call("datto_list_device_jobs", { deviceUid: DEVICE, name: "nitropdf" }))
+    );
+    expect(filtered.returned).toBe(0);
+    const notes = filtered.notes.join(" ");
+    expect(notes).toMatch(/Incomplete search: 1 job/);
+    expect(notes).not.toMatch(/No job runs matching/);
+  });
+
+  it("reads offset-free since/until as UTC whatever the host time zone", async () => {
+    const originalTz = process.env.TZ;
+    process.env.TZ = "America/New_York";
+    try {
+      let activityUrl = "";
+      stubFetch((url) => {
+        if (url.startsWith(ACTIVITY_PREFIX)) {
+          activityUrl = url;
+          return jsonResponse({ pageDetails: { nextPageUrl: null }, activities: [] });
+        }
+        return undefined;
+      });
+      const out = JSON.parse(
+        await resultText(
+          await call("datto_list_device_jobs", {
+            deviceUid: DEVICE,
+            since: "2026-11-01T09:00:00",
+            until: "2026-11-02T09:00",
+          })
+        )
+      );
+      const q = new URL(activityUrl).searchParams;
+      expect(q.get("from")).toBe("2026-11-01T09:00:00Z");
+      expect(q.get("until")).toBe("2026-11-02T09:00:00Z");
+      expect(out.since).toBe("2026-11-01T09:00:00Z");
+    } finally {
+      if (originalTz === undefined) delete process.env.TZ;
+      else process.env.TZ = originalTz;
+    }
+  });
+
   it("is annotated read-only in tools/list", async () => {
     const res = await worker.fetch(
       new Request("http://worker.local/mcp", {
