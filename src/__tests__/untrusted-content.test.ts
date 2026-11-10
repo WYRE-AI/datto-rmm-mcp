@@ -34,6 +34,7 @@ describe("UNTRUSTED_CONTENT_TOOLS", () => {
       "datto_get_device",
       "datto_find_device",
       "datto_get_device_audit",
+      "datto_list_device_jobs",
     ]) {
       expect(UNTRUSTED_CONTENT_TOOLS.has(name)).toBe(true);
     }

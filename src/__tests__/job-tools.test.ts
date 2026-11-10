@@ -1,7 +1,8 @@
 /**
  * Coverage for the job read tools that wrap the SDK's `client.jobs`
  * resource: datto_get_job, datto_get_job_components, datto_get_job_results,
- * datto_get_job_stdout, and datto_get_job_stderr.
+ * datto_get_job_stdout, and datto_get_job_stderr - plus
+ * datto_list_device_jobs, which finds the job UIDs those tools need.
  *
  * Before these existed, a failed datto_run_quickjob was undiagnosable from
  * inside the MCP — it was fire-and-forget and returned only a generic
@@ -213,7 +214,558 @@ describe("job read tools", () => {
         "datto_get_job_results",
         "datto_get_job_stdout",
         "datto_get_job_stderr",
+        "datto_list_device_jobs",
       ])
     );
+  });
+});
+
+/**
+ * datto_list_device_jobs: activity-log rows (`GET /v2/activity-logs`) whose
+ * `details` is a JSON string with dotted keys, enriched from
+ * `GET /v2/job/{uid}/results/{deviceUid}`. Fixture shapes mirror a live
+ * response captured on 2026-11-09 (identifiers replaced).
+ */
+describe("datto_list_device_jobs", () => {
+  const DEVICE = "76a3ba3b-0000-4000-8000-000000000001";
+  const OTHER_DEVICE = "76a3ba3b-0000-4000-8000-000000000002";
+  const RECURRING = "dd3c5669-0000-4000-8000-00000000000a";
+  const QUICK = "2e1101e5-0000-4000-8000-00000000000b";
+  const ACTIVITY_PREFIX = `${DATTO_HOST}/api/v2/activity-logs?`;
+
+  // 2026-11-08T21:45:00Z and the same job's previous run a day earlier.
+  const LATEST_RUN_S = 1794174300;
+  const EARLIER_RUN_S = LATEST_RUN_S - 86400;
+  const QUICK_RUN_S = 1794180451;
+
+  function activity(opts: {
+    jobUid?: string;
+    jobName: string;
+    dateS: number;
+    device?: string;
+    hasStdOut?: boolean;
+    user?: Record<string, unknown> | null;
+  }) {
+    const details: Record<string, unknown> = {
+      "device.hostname": "CWS0001",
+      "device.uid": opts.device ?? DEVICE,
+      entity: "device",
+      "event.action": "deployment",
+      "event.category": "job",
+      "job.name": opts.jobName,
+      "job.status": "scheduled",
+      "job.scheduled_job_uid": "3209ce19-0000-4000-8000-0000000000ff",
+      uid: "87557555-0000-4000-8000-0000000000ee",
+    };
+    if (opts.jobUid) details["job.uid"] = opts.jobUid;
+    return {
+      id: `${opts.dateS}`,
+      entity: "DEVICE",
+      category: "job",
+      action: "deployment",
+      date: opts.dateS + 0.24,
+      deviceId: 2941912,
+      hostname: "CWS0001",
+      user: opts.user ?? null,
+      details: JSON.stringify(details),
+      hasStdOut: opts.hasStdOut ?? false,
+      hasStdErr: false,
+    };
+  }
+
+  function result(jobUid: string, ranOnS: number, componentName: string, status = "Success") {
+    return jsonResponse({
+      jobUid,
+      deviceUid: DEVICE,
+      ranOn: ranOnS * 1000,
+      jobDeploymentStatus: status,
+      componentResults: [
+        {
+          componentUid: "4ca56165-0000-4000-8000-0000000000cc",
+          componentName,
+          componentStatus: status,
+          numberOfWarnings: 0,
+          hasStdOut: true,
+          hasStdErr: false,
+        },
+      ],
+    });
+  }
+
+  async function errorText(res: Response): Promise<string> {
+    const body = (await res.json()) as {
+      result?: { content?: { text?: string }[]; isError?: boolean };
+    };
+    expect(body.result?.isError).toBe(true);
+    return body.result?.content?.[0]?.text ?? "";
+  }
+
+  // Job names can embed the hostname, so this tool's output is wrapped as
+  // untrusted data (see untrusted-content.ts). Shadows the file-level
+  // resultText: asserts the <datto-data> boundary, returns the JSON inside.
+  async function resultText(res: Response): Promise<string> {
+    const body = (await res.json()) as {
+      result?: { content?: { text?: string }[]; isError?: boolean };
+    };
+    expect(body.result?.isError).toBeFalsy();
+    const text = body.result?.content?.[0]?.text ?? "";
+    expect(text.startsWith("<datto-data>\n")).toBe(true);
+    expect(text).toMatch(/not instructions/);
+    return text.slice("<datto-data>\n".length, text.indexOf("\n</datto-data>"));
+  }
+
+  it("lists job runs newest first, with outcome only on the run the stored result belongs to", async () => {
+    let activityUrl = "";
+    stubFetch((url) => {
+      if (url.startsWith(ACTIVITY_PREFIX)) {
+        activityUrl = url;
+        return jsonResponse({
+          pageDetails: { count: 5, nextPageUrl: null },
+          activities: [
+            activity({ jobUid: QUICK, jobName: "QuickJob running component Get-NitroPDFInfo on device CWS0001", dateS: QUICK_RUN_S, user: { id: 7, userName: "jdoe", firstName: "Jane", lastName: "Doe" } }),
+            activity({ jobUid: RECURRING, jobName: "Add Bitlocker key to UDF 9", dateS: LATEST_RUN_S, hasStdOut: true }),
+            // Another device's row must be dropped even if the search returns it.
+            activity({ jobUid: "ffffffff-0000-4000-8000-000000000000", jobName: "Other", dateS: LATEST_RUN_S - 10, device: OTHER_DEVICE }),
+            // A row without job.uid can't be followed up, so it's skipped.
+            activity({ jobName: "No uid", dateS: LATEST_RUN_S - 20 }),
+            activity({ jobUid: RECURRING, jobName: "Add Bitlocker key to UDF 9", dateS: EARLIER_RUN_S, hasStdOut: true }),
+          ],
+        });
+      }
+      if (url === `${DATTO_HOST}/api/v2/job/${QUICK}/results/${DEVICE}`) {
+        return result(QUICK, QUICK_RUN_S, "Get-NitroPDFInfo");
+      }
+      if (url === `${DATTO_HOST}/api/v2/job/${RECURRING}/results/${DEVICE}`) {
+        return result(RECURRING, LATEST_RUN_S, "Bitlocker Recovery Key (Powershell)");
+      }
+      return undefined;
+    });
+
+    const res = await call("datto_list_device_jobs", {
+      deviceUid: DEVICE,
+      since: "2026-11-01T00:00:00Z",
+      until: "2026-11-09T00:00:00Z",
+    });
+    const out = JSON.parse(await resultText(res));
+
+    // Request: documented params, server-side device filter, no millis in dates.
+    const q = new URL(activityUrl).searchParams;
+    expect(q.get("categories")).toBe("job");
+    expect(q.get("entities")).toBe("device");
+    expect(q.get("order")).toBe("desc");
+    expect(q.get("from")).toBe("2026-11-01T00:00:00Z");
+    expect(q.get("until")).toBe("2026-11-09T00:00:00Z");
+    expect(q.get("searchQuery")).toBe(`device.uid : "${DEVICE}"`);
+
+    expect(out.deviceUid).toBe(DEVICE);
+    expect(out.returned).toBe(3);
+    expect(out.jobs.map((j: { jobUid: string }) => j.jobUid)).toEqual([QUICK, RECURRING, RECURRING]);
+
+    const [quick, latest, earlier] = out.jobs;
+    expect(quick.jobName).toContain("Get-NitroPDFInfo");
+    expect(quick.status).toBe("Success");
+    expect(quick.componentNames).toEqual(["Get-NitroPDFInfo"]);
+    expect(quick.startedBy).toBe("jdoe");
+    expect(quick.deployedAt).toBe(new Date((QUICK_RUN_S + 0.24) * 1000).toISOString());
+
+    expect(latest.status).toBe("Success");
+    expect(latest.ranOn).toBe(new Date(LATEST_RUN_S * 1000).toISOString());
+    expect(latest.components[0]).toMatchObject({ name: "Bitlocker Recovery Key (Powershell)", status: "Success", hasStdOut: true });
+    expect(latest.startedBy).toBeUndefined();
+
+    // Same job.uid, earlier run: no borrowed outcome, but still identifiable.
+    expect(earlier.status).toBeUndefined();
+    expect(earlier.ranOn).toBeUndefined();
+    expect(earlier.componentNames).toEqual(["Bitlocker Recovery Key (Powershell)"]);
+    expect(earlier.statusNote).toMatch(/latest run/);
+    expect(out.notes.join(" ")).toMatch(/LATEST run/);
+
+    // The activity row's hostname field isn't passed through (the quick
+    // job's name still embeds it, hence the untrusted-content wrapper).
+    expect(JSON.stringify(out)).not.toContain('"hostname"');
+  });
+
+  it("looks up each job's result once, however many runs it has", async () => {
+    const resultCalls: string[] = [];
+    stubFetch((url) => {
+      if (url.startsWith(ACTIVITY_PREFIX)) {
+        return jsonResponse({
+          pageDetails: { nextPageUrl: null },
+          activities: [0, 1, 2].map((i) =>
+            activity({ jobUid: RECURRING, jobName: "Daily", dateS: LATEST_RUN_S - i * 86400 })
+          ),
+        });
+      }
+      if (url.includes("/results/")) {
+        resultCalls.push(url);
+        return result(RECURRING, LATEST_RUN_S, "Daily component");
+      }
+      return undefined;
+    });
+
+    const res = await call("datto_list_device_jobs", { deviceUid: DEVICE });
+    const out = JSON.parse(await resultText(res));
+    expect(out.returned).toBe(3);
+    expect(resultCalls).toHaveLength(1);
+  });
+
+  it("filters case-insensitively on job name or component name", async () => {
+    stubFetch((url) => {
+      if (url.startsWith(ACTIVITY_PREFIX)) {
+        return jsonResponse({
+          pageDetails: { nextPageUrl: null },
+          activities: [
+            activity({ jobUid: QUICK, jobName: "Weekly maintenance", dateS: QUICK_RUN_S }),
+            activity({ jobUid: RECURRING, jobName: "Restart Desktop at 4am", dateS: LATEST_RUN_S }),
+          ],
+        });
+      }
+      if (url === `${DATTO_HOST}/api/v2/job/${QUICK}/results/${DEVICE}`) {
+        return result(QUICK, QUICK_RUN_S, "Get-NitroPDFInfo");
+      }
+      if (url === `${DATTO_HOST}/api/v2/job/${RECURRING}/results/${DEVICE}`) {
+        return result(RECURRING, LATEST_RUN_S, "Restart Computer");
+      }
+      return undefined;
+    });
+
+    const byComponent = JSON.parse(
+      await resultText(await call("datto_list_device_jobs", { deviceUid: DEVICE, name: "nitropdf" }))
+    );
+    expect(byComponent.jobs.map((j: { jobUid: string }) => j.jobUid)).toEqual([QUICK]);
+
+    const byJobName = JSON.parse(
+      await resultText(await call("datto_list_device_jobs", { deviceUid: DEVICE, name: "RESTART desktop" }))
+    );
+    expect(byJobName.jobs.map((j: { jobUid: string }) => j.jobUid)).toEqual([RECURRING]);
+
+    const none = JSON.parse(
+      await resultText(await call("datto_list_device_jobs", { deviceUid: DEVICE, name: "nothing-matches" }))
+    );
+    expect(none.returned).toBe(0);
+    expect(none.notes.join(" ")).toMatch(/No job runs matching/);
+  });
+
+  it("follows nextPageUrl and stops at max", async () => {
+    const pages: string[] = [];
+    const page2 = `${DATTO_HOST}/api/v2/activity-logs?page=next&searchAfter=abc`;
+    stubFetch((url) => {
+      if (url === page2) {
+        pages.push(url);
+        return jsonResponse({
+          pageDetails: { nextPageUrl: `${DATTO_HOST}/api/v2/activity-logs?page=next&searchAfter=def` },
+          activities: [
+            activity({ jobUid: "a3000000-0000-4000-8000-000000000003", jobName: "Job 3", dateS: LATEST_RUN_S - 300 }),
+            activity({ jobUid: "a4000000-0000-4000-8000-000000000004", jobName: "Job 4", dateS: LATEST_RUN_S - 400 }),
+          ],
+        });
+      }
+      if (url.startsWith(ACTIVITY_PREFIX)) {
+        pages.push(url);
+        return jsonResponse({
+          pageDetails: { nextPageUrl: page2 },
+          activities: [
+            activity({ jobUid: "a1000000-0000-4000-8000-000000000001", jobName: "Job 1", dateS: LATEST_RUN_S - 100 }),
+            activity({ jobUid: "a2000000-0000-4000-8000-000000000002", jobName: "Job 2", dateS: LATEST_RUN_S - 200 }),
+          ],
+        });
+      }
+      if (url.includes("/results/")) {
+        return new Response("not found", { status: 404 });
+      }
+      return undefined;
+    });
+
+    const out = JSON.parse(
+      await resultText(await call("datto_list_device_jobs", { deviceUid: DEVICE, max: 3 }))
+    );
+    expect(pages).toHaveLength(2);
+    expect(out.jobs.map((j: { jobName: string }) => j.jobName)).toEqual(["Job 1", "Job 2", "Job 3"]);
+    // A job whose result Datto no longer has is still listed.
+    expect(out.jobs[0].statusNote).toMatch(/no stored result/);
+  });
+
+  it("refuses to send the token to a paging URL on another host", async () => {
+    stubFetch((url) => {
+      if (url.startsWith(ACTIVITY_PREFIX)) {
+        return jsonResponse({
+          pageDetails: { nextPageUrl: "https://attacker.example/api/v2/activity-logs?page=next" },
+          activities: [],
+        });
+      }
+      return undefined;
+    });
+
+    const text = await errorText(await call("datto_list_device_jobs", { deviceUid: DEVICE }));
+    expect(text).toMatch(/outside the configured platform API/);
+    const urls = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.map((c) => String(c[0]));
+    expect(urls.some((u) => u.includes("attacker.example"))).toBe(false);
+  });
+
+  it("rejects a deviceUid that isn't a UID, before calling the API", async () => {
+    stubFetch(() => undefined);
+    const text = await errorText(
+      await call("datto_list_device_jobs", { deviceUid: 'x" OR device.uid : *' })
+    );
+    expect(text).toMatch(/deviceUid must be/);
+    expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(0);
+  });
+
+  it("rejects an invalid or inverted date window", async () => {
+    stubFetch(() => undefined);
+    expect(
+      await errorText(await call("datto_list_device_jobs", { deviceUid: DEVICE, since: "last tuesday" }))
+    ).toMatch(/since must be an ISO 8601/);
+    expect(
+      await errorText(
+        await call("datto_list_device_jobs", { deviceUid: DEVICE, since: "2026-11-09", until: "2026-11-01" })
+      )
+    ).toMatch(/since must be earlier than until/);
+  });
+
+  it("surfaces the activity log's database-layer error field", async () => {
+    stubFetch((url) =>
+      url.startsWith(ACTIVITY_PREFIX) ? jsonResponse({ error: "search backend unavailable" }) : undefined
+    );
+    const text = await errorText(await call("datto_list_device_jobs", { deviceUid: DEVICE }));
+    expect(text).toMatch(/search backend unavailable/);
+  });
+
+  it("gives an untimed (pending/running) result only to the newest run, and only when the window reaches now", async () => {
+    const nowS = Math.floor(Date.now() / 1000);
+    const rows = (latestS: number) => [
+      activity({ jobUid: RECURRING, jobName: "Daily", dateS: latestS }),
+      activity({ jobUid: RECURRING, jobName: "Daily", dateS: latestS - 86400 }),
+    ];
+    let activityRows = rows(nowS - 60);
+    stubFetch((url) => {
+      if (url.startsWith(ACTIVITY_PREFIX)) {
+        return jsonResponse({ pageDetails: { nextPageUrl: null }, activities: activityRows });
+      }
+      if (url.includes("/results/")) {
+        return jsonResponse({ jobUid: RECURRING, deviceUid: DEVICE, ranOn: null, jobDeploymentStatus: "Running", componentResults: [] });
+      }
+      return undefined;
+    });
+
+    // Default window (until = now): newest row is the latest deployment.
+    const live = JSON.parse(await resultText(await call("datto_list_device_jobs", { deviceUid: DEVICE })));
+    expect(live.jobs[0].status).toBe("Running");
+    expect(live.jobs[1].status).toBeUndefined();
+    expect(live.jobs[1].statusNote).toMatch(/can't be matched/);
+
+    // Historical window: its newest row may not be the latest deployment.
+    activityRows = rows(LATEST_RUN_S);
+    const past = JSON.parse(
+      await resultText(
+        await call("datto_list_device_jobs", { deviceUid: DEVICE, since: "2026-11-01", until: "2026-11-05" })
+      )
+    );
+    expect(past.jobs.map((j: { status?: string }) => j.status)).toEqual([undefined, undefined]);
+  });
+
+  it("matches a result to its deployment by boundaries, not a fixed window", async () => {
+    let activities: unknown[] = [];
+    let ranOnS = 0;
+    stubFetch((url) => {
+      if (url.startsWith(ACTIVITY_PREFIX)) {
+        return jsonResponse({ pageDetails: { nextPageUrl: null }, activities });
+      }
+      if (url.includes("/results/")) return result(RECURRING, ranOnS, "Daily component");
+      return undefined;
+    });
+    const list = async (args: Record<string, unknown>) =>
+      JSON.parse(await resultText(await call("datto_list_device_jobs", { deviceUid: DEVICE, ...args })));
+
+    // Delayed execution: the only deployment ran 6 minutes later. Its result
+    // is current, not an overwritten earlier run.
+    activities = [activity({ jobUid: RECURRING, jobName: "Daily", dateS: LATEST_RUN_S })];
+    ranOnS = LATEST_RUN_S + 360;
+    const delayed = await list({ since: "2026-11-01", until: "2026-11-09" });
+    expect(delayed.jobs[0].status).toBe("Success");
+    expect(delayed.jobs[0].ranOn).toBe(new Date(ranOnS * 1000).toISOString());
+
+    // The newest deployment hasn't reported yet; the stored result belongs
+    // to the previous one.
+    activities = [
+      activity({ jobUid: RECURRING, jobName: "Daily", dateS: LATEST_RUN_S }),
+      activity({ jobUid: RECURRING, jobName: "Daily", dateS: EARLIER_RUN_S }),
+    ];
+    ranOnS = EARLIER_RUN_S + 30;
+    const pending = await list({ since: "2026-11-01", until: "2026-11-09" });
+    expect(pending.jobs[0].status).toBeUndefined();
+    expect(pending.jobs[0].statusNote).toMatch(/Deployed after the job's stored result ran/);
+    expect(pending.jobs[1].status).toBe("Success");
+
+    // A historical window whose result ran after the window ends: a later
+    // deployment outside the window may own it, so nothing is claimed -
+    // neither a status nor "output gone".
+    ranOnS = LATEST_RUN_S + 2 * 86400;
+    const historical = await list({ since: "2026-11-01", until: "2026-11-08T22:00:00Z" });
+    expect(historical.jobs.map((j: { status?: string }) => j.status)).toEqual([undefined, undefined]);
+    expect(historical.jobs[0].statusNote).toMatch(/after this window ends/);
+    expect(historical.jobs[1].statusNote).toMatch(/after this window ends/);
+    expect((historical.notes ?? []).join(" ")).not.toMatch(/LATEST run/);
+  });
+
+  it("keeps deployments the name filter drops as boundaries, so a renamed job's old run isn't given the new run's result", async () => {
+    stubFetch((url) => {
+      if (url.startsWith(ACTIVITY_PREFIX)) {
+        return jsonResponse({
+          pageDetails: { nextPageUrl: null },
+          activities: [
+            activity({ jobUid: RECURRING, jobName: "Current", dateS: LATEST_RUN_S }),
+            activity({ jobUid: RECURRING, jobName: "Legacy", dateS: EARLIER_RUN_S }),
+          ],
+        });
+      }
+      if (url.includes("/results/")) return result(RECURRING, LATEST_RUN_S, "Daily component");
+      return undefined;
+    });
+
+    const out = JSON.parse(
+      await resultText(
+        await call("datto_list_device_jobs", { deviceUid: DEVICE, name: "legacy", since: "2026-11-01", until: "2026-11-09" })
+      )
+    );
+    expect(out.jobs.map((j: { jobName: string }) => j.jobName)).toEqual(["Legacy"]);
+    expect(out.jobs[0].status).toBeUndefined();
+    expect(out.jobs[0].ranOn).toBeUndefined();
+    expect(out.jobs[0].statusNote).toMatch(/latest run/);
+  });
+
+  it("never gives a redeployment minutes later the earlier run's result, and leaves near-simultaneous deployments unmatched", async () => {
+    let activities: unknown[] = [];
+    let ranOnS = 0;
+    stubFetch((url) => {
+      if (url.startsWith(ACTIVITY_PREFIX)) {
+        return jsonResponse({ pageDetails: { nextPageUrl: null }, activities });
+      }
+      if (url.includes("/results/")) return result(RECURRING, ranOnS, "Daily component");
+      return undefined;
+    });
+    const list = async () =>
+      JSON.parse(
+        await resultText(
+          await call("datto_list_device_jobs", { deviceUid: DEVICE, since: "2026-11-01", until: "2026-11-09" })
+        )
+      );
+
+    // Deployed at 21:45:00 and again at 21:49:00; only the first has run
+    // (21:45:20). The 21:49 redeployment is pending, not the owner.
+    activities = [
+      activity({ jobUid: RECURRING, jobName: "Daily", dateS: LATEST_RUN_S + 240 }),
+      activity({ jobUid: RECURRING, jobName: "Daily", dateS: LATEST_RUN_S }),
+    ];
+    ranOnS = LATEST_RUN_S + 20;
+    const redeployed = await list();
+    expect(redeployed.jobs[0].status).toBeUndefined();
+    expect(redeployed.jobs[0].statusNote).toMatch(/Deployed after the job's stored result ran/);
+    expect(redeployed.jobs[1].status).toBe("Success");
+    expect(redeployed.jobs[1].ranOn).toBe(new Date(ranOnS * 1000).toISOString());
+
+    // Two deployments 10 s apart, result between them: can't tell which.
+    activities = [
+      activity({ jobUid: RECURRING, jobName: "Daily", dateS: LATEST_RUN_S + 10 }),
+      activity({ jobUid: RECURRING, jobName: "Daily", dateS: LATEST_RUN_S }),
+      activity({ jobUid: RECURRING, jobName: "Daily", dateS: EARLIER_RUN_S }),
+    ];
+    ranOnS = LATEST_RUN_S + 5;
+    const ambiguous = await list();
+    expect(ambiguous.jobs.map((j: { status?: string }) => j.status)).toEqual([undefined, undefined, undefined]);
+    expect(ambiguous.jobs[0].statusNote).toMatch(/can't be told which/);
+    expect(ambiguous.jobs[1].statusNote).toMatch(/can't be told which/);
+    // The day-old run is still known to be replaced by a later one.
+    expect(ambiguous.jobs[2].statusNote).toMatch(/latest run/);
+  });
+
+  it("reports a failed results lookup instead of treating it as 'no stored result'", async () => {
+    stubFetch((url) => {
+      if (url.startsWith(ACTIVITY_PREFIX)) {
+        return jsonResponse({
+          pageDetails: { nextPageUrl: null },
+          activities: [activity({ jobUid: QUICK, jobName: "Weekly maintenance", dateS: QUICK_RUN_S })],
+        });
+      }
+      if (url.includes("/results/")) {
+        return new Response(JSON.stringify({ message: "missing scope" }), {
+          status: 403,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return undefined;
+    });
+
+    const unfiltered = JSON.parse(await resultText(await call("datto_list_device_jobs", { deviceUid: DEVICE })));
+    expect(unfiltered.jobs[0].statusNote).toMatch(/Results lookup failed/);
+    expect(unfiltered.jobs[0].statusNote).not.toMatch(/no stored result/);
+    expect(unfiltered.notes.join(" ")).toMatch(/lookups failed/);
+
+    // With a component-name filter the job can't be checked: say the search
+    // is incomplete rather than "No job runs matching".
+    const filtered = JSON.parse(
+      await resultText(await call("datto_list_device_jobs", { deviceUid: DEVICE, name: "nitropdf" }))
+    );
+    expect(filtered.returned).toBe(0);
+    const notes = filtered.notes.join(" ");
+    expect(notes).toMatch(/Incomplete search: 1 job/);
+    expect(notes).not.toMatch(/No job runs matching/);
+  });
+
+  it("reads offset-free since/until as UTC whatever the host time zone", async () => {
+    const originalTz = process.env.TZ;
+    process.env.TZ = "America/New_York";
+    try {
+      let activityUrl = "";
+      stubFetch((url) => {
+        if (url.startsWith(ACTIVITY_PREFIX)) {
+          activityUrl = url;
+          return jsonResponse({ pageDetails: { nextPageUrl: null }, activities: [] });
+        }
+        return undefined;
+      });
+      const out = JSON.parse(
+        await resultText(
+          await call("datto_list_device_jobs", {
+            deviceUid: DEVICE,
+            since: "2026-11-01T09:00:00",
+            until: "2026-11-02T09:00",
+          })
+        )
+      );
+      const q = new URL(activityUrl).searchParams;
+      expect(q.get("from")).toBe("2026-11-01T09:00:00Z");
+      expect(q.get("until")).toBe("2026-11-02T09:00:00Z");
+      expect(out.since).toBe("2026-11-01T09:00:00Z");
+    } finally {
+      if (originalTz === undefined) delete process.env.TZ;
+      else process.env.TZ = originalTz;
+    }
+  });
+
+  it("is annotated read-only in tools/list", async () => {
+    const res = await worker.fetch(
+      new Request("http://worker.local/mcp", {
+        method: "POST",
+        headers: {
+          Accept: "application/json, text/event-stream",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+      }),
+      {}
+    );
+    const body = (await res.json()) as {
+      result?: {
+        tools?: {
+          name: string;
+          annotations?: { readOnlyHint?: boolean };
+          inputSchema?: { required?: string[] };
+        }[];
+      };
+    };
+    const tool = body.result?.tools?.find((t) => t.name === "datto_list_device_jobs");
+    expect(tool?.annotations?.readOnlyHint).toBe(true);
+    expect(tool?.inputSchema?.required).toEqual(["deviceUid"]);
   });
 });

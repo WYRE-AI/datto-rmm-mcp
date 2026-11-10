@@ -35,6 +35,7 @@ import {
 } from "./alert-card.js";
 import { ALERT_CARD_HTML } from "./generated/alert-card-html.js";
 import { getDevicePatches, getSitePatches } from "./patches.js";
+import { listDeviceJobs } from "./device-jobs.js";
 import {
   applyUntrustedContentMarkers,
   type ToolResultLike,
@@ -737,6 +738,42 @@ export function createMcpServer(
           },
         },
         {
+          name: "datto_list_device_jobs",
+          description:
+            "List the jobs (quick jobs and scheduled jobs) that ran on a device, newest first, from the Datto RMM activity log. Use this to find a jobUid when you don't already have one, e.g. \"the last Get-NitroPDFInfo run on device X\" - then pass the jobUid and deviceUid to datto_get_job_results, datto_get_job_stdout or datto_get_job_stderr. Defaults to the last 7 days. Each row has the jobUid, job name, component name(s), deployment time and, for the job's most recent run, its status and run time. Datto RMM keeps results and output only for a job's LATEST run on a device, so for a recurring job the older rows carry no status and the output tools return the latest run. The API exposes no job end time. Requires the API user to have the Audit: View permission. If you only have a hostname, call datto_find_device first.",
+          annotations: { readOnlyHint: true },
+          inputSchema: {
+            type: "object",
+            properties: {
+              deviceUid: {
+                type: "string",
+                description: "The device UID",
+              },
+              since: {
+                type: "string",
+                description:
+                  "Start of the window, ISO 8601 date or date-time (UTC if no offset), e.g. 2026-11-01. Defaults to 7 days before until.",
+              },
+              until: {
+                type: "string",
+                description:
+                  "End of the window, ISO 8601 date or date-time. Defaults to now.",
+              },
+              name: {
+                type: "string",
+                description:
+                  'Case-insensitive substring filter on the job name or its component name(s), e.g. "NitroPDF".',
+              },
+              max: {
+                type: "number",
+                description: "Maximum number of job runs to return (default: 25, max: 100)",
+                default: 25,
+              },
+            },
+            required: ["deviceUid"],
+          },
+        },
+        {
           name: "datto_get_device_audit",
           description:
             "Get audit data for a device (hardware, software, OS information)",
@@ -1192,6 +1229,30 @@ export function createMcpServer(
           return {
             content: [
               { type: "text", text: JSON.stringify(stderr ?? "", null, 2) },
+            ],
+          };
+        }
+
+        // The activity log is read directly (see device-jobs.ts for why the
+        // SDK's activityLogs resource can't be used); per-job outcomes go
+        // through the SDK's jobs resource like datto_get_job_results.
+        case "datto_list_device_jobs": {
+          const { deviceUid, since, until, name: jobName, max } = args as {
+            deviceUid: string;
+            since?: string;
+            until?: string;
+            name?: string;
+            max?: number;
+          };
+          const result = await listDeviceJobs(
+            creds,
+            deviceUid,
+            (jobUid) => client.jobs.results(jobUid, deviceUid.trim()),
+            { since, until, name: jobName, max }
+          );
+          return {
+            content: [
+              { type: "text", text: JSON.stringify(result, null, 2) },
             ],
           };
         }
