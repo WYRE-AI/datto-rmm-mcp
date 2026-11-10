@@ -35,10 +35,13 @@
  * `componentResults[].componentName`). Recurring jobs reuse ONE job.uid for
  * every run, and that endpoint only holds the most recent run (verified live:
  * `ranOn` matched the newest of two runs). So a result is attached only to the
- * deployment it came from - the newest deployment at or before its `ranOn`,
- * which also covers runs that start long after deployment. Older runs say
- * their output was replaced; runs that can't be matched say the outcome is
- * unknown. Neither borrows the latest run's outcome.
+ * deployment it came from: the one deployment within a small clock-skew
+ * allowance of its `ranOn`, else the newest deployment before it (a run that
+ * started long after deployment). Every deployment read counts as a
+ * boundary, including ones a name filter leaves out. Older runs say their
+ * output was replaced; runs that can't be matched (including two deployments
+ * too close together to tell apart) say the outcome is unknown. Neither
+ * borrows the latest run's outcome.
  */
 
 import type { DattoCredentials } from "./mcp-server.js";
@@ -56,9 +59,10 @@ const MAX_PAGES = 10;
 /** Hard cap on per-job results lookups per call. */
 const MAX_RESULT_LOOKUPS = 50;
 /** Clock-skew tolerance when comparing a result's `ranOn` with deployment
- *  times and with the window's `until` (live, `ranOn` sits a few hundred ms
- *  BEFORE the activity row's timestamp). */
-const RAN_ON_MATCH_MS = 5 * 60 * 1000;
+ *  times and with the window's `until`. Live, `ranOn` sits a few hundred ms
+ *  BEFORE the activity row's timestamp. Kept small so a redeployment a few
+ *  minutes after a run is never handed that run's result. */
+const RAN_ON_SKEW_MS = 30 * 1000;
 
 /** Datto RMM device UIDs are GUIDs; anything else can't be one, and is never
  *  placed into a search query. */
@@ -313,7 +317,13 @@ export async function listDeviceJobs(
     searchQuery: `device.uid : "${uid}"`,
   });
 
+  // `accepted` holds the rows returned; `deployments` holds EVERY row of this
+  // device read so far, whether or not the name filter accepted it. Results
+  // are matched to deployments over `deployments`, so a deployment the filter
+  // drops (e.g. a recurring job renamed since) still bounds which run the
+  // stored result belongs to.
   const accepted: Candidate[] = [];
+  const deployments: Candidate[] = [];
   let next: string | null | undefined = `/v2/activity-logs?${query.toString()}`;
   let pages = 0;
 
@@ -335,6 +345,10 @@ export async function listDeviceJobs(
         timeMs: activityTimeMs(row.date),
         row,
       };
+      // Rows after max are still kept as boundaries for the rest of this
+      // page (already fetched, so free); they are never returned.
+      deployments.push(candidate);
+      if (accepted.length >= max) continue;
 
       if (nameFilter && !candidate.jobName?.toLowerCase().includes(nameFilter)) {
         // Job names often differ from the component they run (scheduled
@@ -348,7 +362,6 @@ export async function listDeviceJobs(
       }
 
       accepted.push(candidate);
-      if (accepted.length >= max) break;
     }
 
     next = page.pageDetails?.nextPageUrl;
@@ -364,35 +377,52 @@ export async function listDeviceJobs(
   // when the window reaches the present: then the first (newest) row for
   // that job is its latest deployment. Older rows, or a historical window
   // that may exclude the latest deployment, get no borrowed status.
-  const windowReachesNow = now.getTime() - until.getTime() <= RAN_ON_MATCH_MS;
-  const seenJob = new Set<string>();
+  const windowReachesNow = now.getTime() - until.getTime() <= RAN_ON_SKEW_MS;
+
+  // Newest deployment of each job among ALL rows read (not only the ones the
+  // name filter accepted), for the untimed-result rule above.
+  const newestRow = new Map<string, Candidate>();
+  for (const d of deployments) if (!newestRow.has(d.jobUid)) newestRow.set(d.jobUid, d);
 
   // Timed results are matched to deployments by boundaries, not by a fixed
   // window around the deployment time (a run can start well after it was
-  // deployed): a result belongs to the newest deployment of that job at or
-  // before its `ranOn`. `accepted` is newest first, so that is the first
-  // row per job with deployedAt <= ranOn. The match is only certain when no
-  // later deployment can hide outside the window: either the window reaches
-  // now, or the run itself happened before the window ends.
+  // deployed). Over all of the job's deployments read:
+  //  - deployments within RAN_ON_SKEW_MS of `ranOn` are "near". Exactly one
+  //    near deployment owns the result. Two or more is ambiguous (a quick
+  //    redeploy): none is given the result.
+  //  - with none near, the result belongs to the newest deployment before
+  //    `ranOn` (a delayed run).
+  // A deployment after ranOn + skew is never given an earlier result. The
+  // match is only certain when no later deployment can hide outside the
+  // window: either the window reaches now, or the run happened before the
+  // window ends.
   for (const jobUid of new Set(accepted.map((c) => c.jobUid))) {
     await resultFor(jobUid);
   }
   const matchedRow = new Map<string, Candidate>();
-  for (const c of accepted) {
-    if (matchedRow.has(c.jobUid) || c.timeMs === undefined) continue;
-    const l = results.get(c.jobUid);
+  const ambiguousRows = new Set<Candidate>();
+  for (const jobUid of new Set(accepted.map((c) => c.jobUid))) {
+    const l = results.get(jobUid);
     const ran = l?.kind === "ok" ? ranOnMs(l.result.ranOn) : undefined;
-    if (ran !== undefined && c.timeMs <= ran + RAN_ON_MATCH_MS) matchedRow.set(c.jobUid, c);
+    if (ran === undefined) continue;
+    const timed = deployments.filter((d) => d.jobUid === jobUid && d.timeMs !== undefined);
+    const near = timed.filter((d) => Math.abs((d.timeMs as number) - ran) <= RAN_ON_SKEW_MS);
+    if (near.length > 1) {
+      for (const d of near) ambiguousRows.add(d);
+      continue;
+    }
+    // `deployments` is newest first, so find() gives the newest before ranOn.
+    const owner = near[0] ?? timed.find((d) => (d.timeMs as number) < ran);
+    if (owner) matchedRow.set(jobUid, owner);
   }
-  const matchIsCertain = (ran: number) => windowReachesNow || ran <= until.getTime() + RAN_ON_MATCH_MS;
+  const matchIsCertain = (ran: number) => windowReachesNow || ran <= until.getTime() + RAN_ON_SKEW_MS;
 
   const jobs: DeviceJobRun[] = [];
   let olderRunWithoutStatus = false;
   let lookupFailed = false;
   for (const c of accepted) {
     const lookup = await resultFor(c.jobUid);
-    const isNewestForJob = !seenJob.has(c.jobUid);
-    seenJob.add(c.jobUid);
+    const isNewestForJob = newestRow.get(c.jobUid) === c;
     const result = lookup.kind === "ok" ? lookup.result : undefined;
     const matched = matchedRow.get(c.jobUid);
     const run: DeviceJobRun = {
@@ -435,9 +465,12 @@ export async function listDeviceJobs(
       }
     } else if (c.timeMs === undefined) {
       run.statusNote = "This run has no deployment time, so the job's stored result can't be matched to it; outcome unknown.";
-    } else if (c.timeMs > ran + RAN_ON_MATCH_MS) {
+    } else if (c.timeMs > ran + RAN_ON_SKEW_MS) {
       run.statusNote =
         "Deployed after the job's stored result ran, so this run hasn't reported a result yet (or it is still pending); outcome unknown.";
+    } else if (ambiguousRows.has(c)) {
+      run.statusNote =
+        "This job was deployed more than once within moments of when its stored result ran, so it can't be told which of those runs the result belongs to; outcome unknown.";
     } else if (!matchIsCertain(ran)) {
       run.statusNote =
         "The job's stored result is from a run after this window ends, so it can't be matched to a run here; outcome unknown.";

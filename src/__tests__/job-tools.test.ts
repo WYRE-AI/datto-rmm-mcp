@@ -608,6 +608,77 @@ describe("datto_list_device_jobs", () => {
     expect((historical.notes ?? []).join(" ")).not.toMatch(/LATEST run/);
   });
 
+  it("keeps deployments the name filter drops as boundaries, so a renamed job's old run isn't given the new run's result", async () => {
+    stubFetch((url) => {
+      if (url.startsWith(ACTIVITY_PREFIX)) {
+        return jsonResponse({
+          pageDetails: { nextPageUrl: null },
+          activities: [
+            activity({ jobUid: RECURRING, jobName: "Current", dateS: LATEST_RUN_S }),
+            activity({ jobUid: RECURRING, jobName: "Legacy", dateS: EARLIER_RUN_S }),
+          ],
+        });
+      }
+      if (url.includes("/results/")) return result(RECURRING, LATEST_RUN_S, "Daily component");
+      return undefined;
+    });
+
+    const out = JSON.parse(
+      await resultText(
+        await call("datto_list_device_jobs", { deviceUid: DEVICE, name: "legacy", since: "2026-11-01", until: "2026-11-09" })
+      )
+    );
+    expect(out.jobs.map((j: { jobName: string }) => j.jobName)).toEqual(["Legacy"]);
+    expect(out.jobs[0].status).toBeUndefined();
+    expect(out.jobs[0].ranOn).toBeUndefined();
+    expect(out.jobs[0].statusNote).toMatch(/latest run/);
+  });
+
+  it("never gives a redeployment minutes later the earlier run's result, and leaves near-simultaneous deployments unmatched", async () => {
+    let activities: unknown[] = [];
+    let ranOnS = 0;
+    stubFetch((url) => {
+      if (url.startsWith(ACTIVITY_PREFIX)) {
+        return jsonResponse({ pageDetails: { nextPageUrl: null }, activities });
+      }
+      if (url.includes("/results/")) return result(RECURRING, ranOnS, "Daily component");
+      return undefined;
+    });
+    const list = async () =>
+      JSON.parse(
+        await resultText(
+          await call("datto_list_device_jobs", { deviceUid: DEVICE, since: "2026-11-01", until: "2026-11-09" })
+        )
+      );
+
+    // Deployed at 21:45:00 and again at 21:49:00; only the first has run
+    // (21:45:20). The 21:49 redeployment is pending, not the owner.
+    activities = [
+      activity({ jobUid: RECURRING, jobName: "Daily", dateS: LATEST_RUN_S + 240 }),
+      activity({ jobUid: RECURRING, jobName: "Daily", dateS: LATEST_RUN_S }),
+    ];
+    ranOnS = LATEST_RUN_S + 20;
+    const redeployed = await list();
+    expect(redeployed.jobs[0].status).toBeUndefined();
+    expect(redeployed.jobs[0].statusNote).toMatch(/Deployed after the job's stored result ran/);
+    expect(redeployed.jobs[1].status).toBe("Success");
+    expect(redeployed.jobs[1].ranOn).toBe(new Date(ranOnS * 1000).toISOString());
+
+    // Two deployments 10 s apart, result between them: can't tell which.
+    activities = [
+      activity({ jobUid: RECURRING, jobName: "Daily", dateS: LATEST_RUN_S + 10 }),
+      activity({ jobUid: RECURRING, jobName: "Daily", dateS: LATEST_RUN_S }),
+      activity({ jobUid: RECURRING, jobName: "Daily", dateS: EARLIER_RUN_S }),
+    ];
+    ranOnS = LATEST_RUN_S + 5;
+    const ambiguous = await list();
+    expect(ambiguous.jobs.map((j: { status?: string }) => j.status)).toEqual([undefined, undefined, undefined]);
+    expect(ambiguous.jobs[0].statusNote).toMatch(/can't be told which/);
+    expect(ambiguous.jobs[1].statusNote).toMatch(/can't be told which/);
+    // The day-old run is still known to be replaced by a later one.
+    expect(ambiguous.jobs[2].statusNote).toMatch(/latest run/);
+  });
+
   it("reports a failed results lookup instead of treating it as 'no stored result'", async () => {
     stubFetch((url) => {
       if (url.startsWith(ACTIVITY_PREFIX)) {
