@@ -71,6 +71,7 @@
 
 ### Fixed
 
+- **HTTP 429 is never retried.** Datto RMM blocks the source IP (403, about 5 minutes) when requests continue after a 429, and the SDK client retried a 429 three times by default. The client is now created with `rateLimit: { maxRetries: 0 }`, the direct patches calls report a 429 without retrying, and `datto_list_device_jobs` stops at the first 429 instead of looking up the remaining jobs. Rate-limit tool errors now say `HTTP 429` (or `HTTP 403` for an IP block) and `Try again in N s.` (the `Retry-After` where the call reads it, otherwise 60 s, or the 300 s block).
 - **SDK:** bumped `@wyre-technology/node-datto-rmm` to
   [v1.0.5](https://github.com/wyre-technology/node-datto-rmm/releases/tag/v1.0.5),
   which reads HTTP response bodies exactly once. Previously a failed first read left
