@@ -65,19 +65,31 @@ export function isRateLimitError(error: unknown): boolean {
 }
 
 /**
- * Tool-error text for any thrown error. A rate-limit error that does not
- * already say how long to wait (older SDK messages) is reworded so it says
- * "HTTP 429" or "HTTP 403" and "Try again in N s.".
+ * Tool-error text for any thrown error, plus, for a rate limit, the wait in
+ * whole seconds (at least 1). A rate-limit error that does not already say
+ * how long to wait (older SDK messages) is reworded so it says "HTTP 429" or
+ * "HTTP 403" and "Try again in N s."; `retryAfterSeconds` is always that N.
  */
-export function describeError(error: unknown): string {
+export function rateLimitDetails(error: unknown): { message: string; retryAfterSeconds?: number } {
   const message = error instanceof Error ? error.message : String(error);
-  if (!isRateLimitError(error) || /try again in \d+/i.test(message)) return message;
+  if (!isRateLimitError(error)) return { message };
+  const stated = /try again in (\d+) s/i.exec(message);
+  if (stated) return { message, retryAfterSeconds: Math.max(1, Number(stated[1])) };
   const e = error as ErrorShape;
-  if (e.statusCode === 429) return rateLimitMessage(RATE_LIMIT_WAIT_SECONDS, message);
+  if (e.statusCode === 429) {
+    return { message: rateLimitMessage(RATE_LIMIT_WAIT_SECONDS, message), retryAfterSeconds: RATE_LIMIT_WAIT_SECONDS };
+  }
   const seconds =
     typeof e.cooldownMs === "number" && e.cooldownMs > 0 ? Math.ceil(e.cooldownMs / 1000) : IP_BLOCK_WAIT_SECONDS;
-  return (
-    `Datto RMM blocked this IP after rate-limit violations (HTTP 403 Forbidden). Try again in ${seconds} s. ` +
-    `Detail: ${message}`
-  );
+  return {
+    message:
+      `Datto RMM blocked this IP after rate-limit violations (HTTP 403 Forbidden). Try again in ${seconds} s. ` +
+      `Detail: ${message}`,
+    retryAfterSeconds: seconds,
+  };
+}
+
+/** Tool-error text for any thrown error (see rateLimitDetails). */
+export function describeError(error: unknown): string {
+  return rateLimitDetails(error).message;
 }

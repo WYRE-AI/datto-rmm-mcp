@@ -7,7 +7,7 @@
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
 import worker from "../worker.js";
-import { describeError, isRateLimitError, retryAfterSeconds } from "../rate-limit.js";
+import { describeError, isRateLimitError, rateLimitDetails, retryAfterSeconds } from "../rate-limit.js";
 
 const DATTO_HOST = "https://concord-api.centrastage.net";
 const ENV = { DATTO_API_KEY: "test-key", DATTO_API_SECRET: "test-secret" };
@@ -164,6 +164,49 @@ describe("describeError", () => {
     const forbidden = Object.assign(new Error("Access forbidden (403): no scope"), { statusCode: 403 });
     expect(isRateLimitError(forbidden)).toBe(false);
     expect(describeError(forbidden)).toBe("Access forbidden (403): no scope");
+  });
+});
+
+describe("retry_after_seconds on the structured tool error", () => {
+  type ToolBody = {
+    result?: {
+      content?: { text?: string }[];
+      isError?: boolean;
+      structuredContent?: { error_type?: string; retry_after_seconds?: number };
+    };
+  };
+
+  it("carries the same N as the text, for a direct 429 and an SDK 429", async () => {
+    stubFetch((url) =>
+      url.startsWith(`${DATTO_HOST}/api/v2/device/${DEVICE}/patches`) ? tooMany({ "Retry-After": "30" }) : undefined
+    );
+    const direct = ((await (await call("datto_get_device_patches", { deviceUid: DEVICE })).json()) as ToolBody).result;
+    expect(direct?.isError).toBe(true);
+    expect(direct?.content?.[0]?.text).toContain("Try again in 30 s.");
+    expect(direct?.structuredContent).toEqual({ error_type: "rate_limited", retry_after_seconds: 30 });
+
+    stubFetch((url) => (url === `${DATTO_HOST}/api/v2/job/job-123` ? tooMany() : undefined));
+    const sdk = ((await (await call("datto_get_job", { jobUid: "job-123" })).json()) as ToolBody).result;
+    const n = Number(/Try again in (\d+) s\./.exec(sdk?.content?.[0]?.text ?? "")?.[1]);
+    expect(n).toBeGreaterThanOrEqual(1);
+    expect(sdk?.structuredContent).toEqual({ error_type: "rate_limited", retry_after_seconds: n });
+  });
+
+  it("is left off other errors", async () => {
+    stubFetch((url) => (url === `${DATTO_HOST}/api/v2/job/job-404` ? jsonResponse({ message: "nope" }, 404) : undefined));
+    const body = ((await (await call("datto_get_job", { jobUid: "job-404" })).json()) as ToolBody).result;
+    expect(body?.isError).toBe(true);
+    expect(body?.structuredContent).toBeUndefined();
+  });
+});
+
+describe("rateLimitDetails", () => {
+  it("reports an IP block's cooldown and clamps a stated 0 to 1", () => {
+    const blocked = Object.assign(new Error("IP blocked"), { name: "DattoRmmIpBlockedError", statusCode: 403, cooldownMs: 300_000 });
+    expect(rateLimitDetails(blocked).retryAfterSeconds).toBe(300);
+    const zero = Object.assign(new Error("HTTP 429. Try again in 0 s."), { statusCode: 429 });
+    expect(rateLimitDetails(zero).retryAfterSeconds).toBe(1);
+    expect(rateLimitDetails(new Error("plain")).retryAfterSeconds).toBeUndefined();
   });
 });
 

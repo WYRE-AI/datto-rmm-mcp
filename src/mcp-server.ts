@@ -36,7 +36,7 @@ import {
 import { ALERT_CARD_HTML } from "./generated/alert-card-html.js";
 import { getDevicePatches, getSitePatches } from "./patches.js";
 import { listDeviceJobs } from "./device-jobs.js";
-import { describeError } from "./rate-limit.js";
+import { rateLimitDetails } from "./rate-limit.js";
 import {
   applyUntrustedContentMarkers,
   type ToolResultLike,
@@ -1311,11 +1311,16 @@ export function createMcpServer(
           };
       }
       } catch (error) {
-        // describeError makes a 429 / IP block say "HTTP 429" or "HTTP 403"
-        // and "Try again in N s." whichever SDK version threw it.
+        // rateLimitDetails makes a 429 / IP block say "HTTP 429" or "HTTP 403"
+        // and "Try again in N s." whichever SDK version threw it, and gives
+        // the same N as retry_after_seconds on the structured error.
+        const { message, retryAfterSeconds } = rateLimitDetails(error);
         return {
-          content: [{ type: "text", text: `Error: ${describeError(error)}` }],
+          content: [{ type: "text", text: `Error: ${message}` }],
           isError: true,
+          ...(retryAfterSeconds !== undefined
+            ? { structuredContent: { error_type: "rate_limited", retry_after_seconds: retryAfterSeconds } }
+            : {}),
         };
       }
     })();
