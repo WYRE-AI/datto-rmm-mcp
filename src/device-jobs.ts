@@ -66,7 +66,7 @@ const RAN_ON_SKEW_MS = 30 * 1000;
 
 /** Datto RMM device UIDs are GUIDs; anything else can't be one, and is never
  *  placed into a search query. */
-const DEVICE_UID_RE = /^[A-Za-z0-9-]{1,64}$/;
+export const DEVICE_UID_RE = /^[A-Za-z0-9-]{1,64}$/;
 
 /** Activity-log row, as documented in the v2 Swagger spec. */
 interface ActivityLog {

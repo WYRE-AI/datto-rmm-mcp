@@ -157,7 +157,7 @@ run anything are never annotated as read-only.
 | `datto_get_device_audit` | Get device audit data (full or software only) | Yes |
 | `datto_get_device_patches` | Get Windows patch installation status for a device | Yes |
 | `datto_get_site_patches` | Get Windows patch installation status across all devices in a site | Yes |
-| `datto_set_device_udf` | Set user-defined fields (udf1-udf30) on a device | No |
+| `datto_set_device_udf` | Set user-defined fields (udf1-udf300) on a device | No |
 
 ## Docker
 

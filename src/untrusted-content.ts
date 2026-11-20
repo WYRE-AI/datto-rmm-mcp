@@ -97,9 +97,10 @@ const DEFAULT_REASON =
  *   short RMM-agent diagnostic (e.g. "component timed out"), not captured
  *   process output — unlike stdout/stderr, it is not a channel for
  *   arbitrary endpoint text.
- * - `datto_run_quickjob` / `datto_resolve_alert`: these return a vendor
- *   acknowledgement (a new job UID, a resolved status) — not content
- *   shaped by a device.
+ * - `datto_run_quickjob` / `datto_resolve_alert` / `datto_set_device_udf`:
+ *   these return a vendor acknowledgement (a new job UID, a resolved
+ *   status) or, for the UDF write, a confirmation built from the validated
+ *   inputs — not content shaped by a device.
  * - `datto_get_device_patches` / `datto_get_site_patches`: patch titles, KB
  *   numbers, and severity come from Microsoft's WSUS catalog and are
  *   identical for every device regardless of what is running on the

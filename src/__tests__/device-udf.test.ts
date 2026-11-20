@@ -5,7 +5,7 @@
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
 import worker from "../worker.js";
-import { parseUdfFields } from "../udf.js";
+import { parseDeviceUid, parseUdfFields } from "../udf.js";
 
 const DATTO_HOST = "https://concord-api.centrastage.net";
 const ENV = { DATTO_API_KEY: "test-key", DATTO_API_SECRET: "test-secret" };
@@ -65,10 +65,8 @@ describe("datto_set_device_udf", () => {
     stubFetch((url, init) => {
       if (url === `${DATTO_HOST}/api/v2/device/device-1/udf` && init?.method === "POST") {
         capturedBody = JSON.parse(String(init.body));
-        return new Response(
-          JSON.stringify({ deviceUid: "device-1", udf: { udf3: "Finance" } }),
-          { status: 200, headers: { "Content-Type": "application/json" } }
-        );
+        // Datto documents a bare 200 with no body.
+        return new Response(null, { status: 200 });
       }
       return undefined;
     });
@@ -80,23 +78,46 @@ describe("datto_set_device_udf", () => {
 
     expect(result?.isError).toBeFalsy();
     expect(capturedBody).toEqual({ udf3: "Finance" });
-    expect(JSON.parse(result?.content?.[0]?.text ?? "{}").udf.udf3).toBe("Finance");
+    expect(JSON.parse(result?.content?.[0]?.text ?? "{}")).toEqual({
+      deviceUid: "device-1",
+      updated: { udf3: "Finance" },
+    });
   });
 
   it("rejects invalid UDF keys without calling Datto", async () => {
     stubFetch(() => undefined);
     const { result } = await rpc("tools/call", {
       name: "datto_set_device_udf",
-      arguments: { deviceUid: "device-1", udf: { udf31: "x" } },
+      arguments: { deviceUid: "device-1", udf: { udf301: "x" } },
     });
     expect(result?.isError).toBe(true);
     expect(result?.content?.[0]?.text).toContain("Invalid UDF key");
   });
+
+  it("rejects a path-traversal deviceUid without calling Datto", async () => {
+    const fetchSpy = vi.fn();
+    stubFetch((url) => {
+      fetchSpy(url);
+      return undefined;
+    });
+    const { result } = await rpc("tools/call", {
+      name: "datto_set_device_udf",
+      arguments: { deviceUid: "../alert/x/resolve?", udf: { udf1: "x" } },
+    });
+    expect(result?.isError).toBe(true);
+    expect(result?.content?.[0]?.text).toContain("deviceUid must be");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
 });
 
 describe("parseUdfFields", () => {
-  it("accepts udf1 through udf30 and empty-string values", () => {
-    expect(parseUdfFields({ udf1: "a", udf30: "" })).toEqual({ udf1: "a", udf30: "" });
+  it("accepts udf1 through udf300 and empty-string values", () => {
+    expect(parseUdfFields({ udf1: "a", udf30: "", udf31: "b", udf300: "c" })).toEqual({
+      udf1: "a",
+      udf30: "",
+      udf31: "b",
+      udf300: "c",
+    });
   });
 
   it.each([
@@ -104,10 +125,23 @@ describe("parseUdfFields", () => {
     [null, "must be an object"],
     [["udf1"], "must be an object"],
     [{ udf0: "x" }, "Invalid UDF key"],
-    [{ udf31: "x" }, "Invalid UDF key"],
+    [{ udf301: "x" }, "Invalid UDF key"],
+    [{ udf310: "x" }, "Invalid UDF key"],
     [{ custom1: "x" }, "Invalid UDF key"],
     [{ udf1: 5 }, "must be a string"],
   ])("rejects %j", (input, message) => {
     expect(() => parseUdfFields(input)).toThrow(message);
+  });
+});
+
+describe("parseDeviceUid", () => {
+  it("accepts GUID-shaped UIDs", () => {
+    expect(parseDeviceUid("0a1b2c3d-4e5f-6789-abcd-ef0123456789")).toBe(
+      "0a1b2c3d-4e5f-6789-abcd-ef0123456789"
+    );
+  });
+
+  it.each(["../alert/x/resolve?", "a/b", "", "a b", 5, undefined])("rejects %j", (input) => {
+    expect(() => parseDeviceUid(input)).toThrow("deviceUid must be");
   });
 });

@@ -35,7 +35,7 @@ import {
 } from "./alert-card.js";
 import { ALERT_CARD_HTML } from "./generated/alert-card-html.js";
 import { getDevicePatches, getSitePatches } from "./patches.js";
-import { parseUdfFields } from "./udf.js";
+import { parseDeviceUid, parseUdfFields } from "./udf.js";
 import { listDeviceJobs } from "./device-jobs.js";
 import {
   applyUntrustedContentMarkers,
@@ -832,7 +832,7 @@ export function createMcpServer(
         {
           name: "datto_set_device_udf",
           description:
-            "Set user-defined fields (UDF1-UDF30) on a device. Datto's endpoint replaces the device's UDF set, so fields omitted from the request may be cleared: call datto_get_device first and send every UDF you want to keep alongside the ones you are changing. Pass an empty string to blank a field.",
+            "Sets user-defined fields (UDF1-UDF300) on a device. Only the fields you send change; omitted UDFs keep their current values. An empty string deletes a field.",
           inputSchema: {
             type: "object",
             properties: {
@@ -843,7 +843,7 @@ export function createMcpServer(
               udf: {
                 type: "object",
                 description:
-                  'UDF values keyed udf1 through udf30, e.g. { "udf3": "Finance" }',
+                  'UDF values keyed udf1 through udf300, e.g. { "udf3": "Finance" }',
                 additionalProperties: { type: "string" },
               },
             },
@@ -1327,13 +1327,21 @@ export function createMcpServer(
             deviceUid: string;
             udf: unknown;
           };
-          const result = await client.devices.setUdf(
-            deviceUid,
-            parseUdfFields(udf)
-          );
+          const uid = parseDeviceUid(deviceUid);
+          const fields = parseUdfFields(udf);
+          // Datto documents a bare 200 with no body for this endpoint, so
+          // confirm from the validated inputs rather than the response.
+          await client.devices.setUdf(uid, fields);
           return {
             content: [
-              { type: "text", text: JSON.stringify(result ?? {}, null, 2) },
+              {
+                type: "text",
+                text: JSON.stringify(
+                  { deviceUid: uid, updated: fields },
+                  null,
+                  2
+                ),
+              },
             ],
           };
         }
