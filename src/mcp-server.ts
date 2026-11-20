@@ -35,6 +35,7 @@ import {
 } from "./alert-card.js";
 import { ALERT_CARD_HTML } from "./generated/alert-card-html.js";
 import { getDevicePatches, getSitePatches } from "./patches.js";
+import { parseUdfFields } from "./udf.js";
 import { listDeviceJobs } from "./device-jobs.js";
 import {
   applyUntrustedContentMarkers,
@@ -828,6 +829,27 @@ export function createMcpServer(
             required: ["siteUid"],
           },
         },
+        {
+          name: "datto_set_device_udf",
+          description:
+            "Set user-defined fields (UDF1-UDF30) on a device. Datto's endpoint replaces the device's UDF set, so fields omitted from the request may be cleared: call datto_get_device first and send every UDF you want to keep alongside the ones you are changing. Pass an empty string to blank a field.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              deviceUid: {
+                type: "string",
+                description: "The device UID",
+              },
+              udf: {
+                type: "object",
+                description:
+                  'UDF values keyed udf1 through udf30, e.g. { "udf3": "Finance" }',
+                additionalProperties: { type: "string" },
+              },
+            },
+            required: ["deviceUid", "udf"],
+          },
+        },
       ],
     };
   });
@@ -1293,6 +1315,22 @@ export function createMcpServer(
         case "datto_get_site_patches": {
           const { siteUid } = args as { siteUid: string };
           const result = await getSitePatches(creds, siteUid);
+          return {
+            content: [
+              { type: "text", text: JSON.stringify(result ?? {}, null, 2) },
+            ],
+          };
+        }
+
+        case "datto_set_device_udf": {
+          const { deviceUid, udf } = args as {
+            deviceUid: string;
+            udf: unknown;
+          };
+          const result = await client.devices.setUdf(
+            deviceUid,
+            parseUdfFields(udf)
+          );
           return {
             content: [
               { type: "text", text: JSON.stringify(result ?? {}, null, 2) },

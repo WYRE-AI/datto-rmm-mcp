@@ -54,6 +54,7 @@
 
 ### Added
 
+- **`datto_set_device_udf` tool** (WYREAI-745). Sets a device's user-defined fields (`udf1` through `udf30`) via `POST /v2/device/{deviceUid}/udf`. It is a write tool (no `readOnlyHint`); keys and values are validated before any request is sent.
 - **Interactive alert card via MCP Apps (SEP-1865).** A new `datto_get_alert` tool fetches a single alert by UID, and its results render as an interactive card in MCP Apps hosts (Claude Desktop/web, and other hosts advertising the `io.modelcontextprotocol/ui` extension), instead of a wall of JSON. The card shows the alert type (label-resolved from the alert context via the SDK's `ALERT_CONTEXT_TYPES` mapping), priority, status, device hostname, site name, category, timestamp, and message — and includes a working "Resolve alert" round-trip that calls `datto_resolve_alert` from inside the card. Non-App hosts are unaffected: the tool's JSON payload is the raw alert plus a new `_card` field.
   - The two renderable tools (`datto_get_alert`, `datto_resolve_alert`) advertise the UI via `_meta` (`ui/resourceUri`, plus the nested `ui.resourceUri` form) pointing at a new `ui://datto-rmm/alert-card.html` resource served as `text/html;profile=mcp-app`. The server now declares the `resources` capability and answers `resources/list` / `resources/read` for the card.
   - The card is **neutral by default** and brandable via `window.__BRAND__` injection or `MCP_BRAND_*` environment variables (`MCP_BRAND_NAME`, `MCP_BRAND_LOGO_URL`, `MCP_BRAND_PRIMARY_COLOR`, `MCP_BRAND_ACCENT_COLOR`, `MCP_BRAND_BG`, `MCP_BRAND_TEXT`), applied at serve time by replacing the card's `BRAND_INJECT` marker. No branding configured = the HTML is served unchanged and the card renders with no brand identity.
@@ -71,6 +72,7 @@
 
 ### Fixed
 
+- **`datto_get_site_patches` 404** (WYREAI-805). It called the nonexistent plural `/v2/sites/{uid}/patches`; Datto's site routes are singular, so it now calls `/v2/site/{uid}/patches`.
 - **SDK:** bumped `@wyre-technology/node-datto-rmm` to
   [v1.0.5](https://github.com/wyre-technology/node-datto-rmm/releases/tag/v1.0.5),
   which reads HTTP response bodies exactly once. Previously a failed first read left
