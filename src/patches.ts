@@ -2,7 +2,7 @@
  * Windows patch installation/compliance data for a device or site.
  *
  * Datto RMM 15.1.0 (rolled out July-Aug 2026) added two new v2 endpoints -
- * GET /v2/device/{deviceUid}/patches and GET /v2/sites/{siteUid}/patches -
+ * GET /v2/device/{deviceUid}/patches and GET /v2/site/{siteUid}/patches -
  * that the upstream @wyre-technology/node-datto-rmm SDK doesn't wrap yet
  * (checked main as of this writing: no resources/patches.ts). DattoRmmClient
  * keeps its HttpClient/AuthManager private, so there's no way to piggyback
@@ -176,6 +176,8 @@ export function getDevicePatches(creds: DattoCredentials, deviceUid: string): Pr
   return fetchPatches(creds, `/v2/device/${encodeURIComponent(deviceUid)}/patches`);
 }
 
+// Datto RMM's site routes are singular (/v2/site/{uid}/...). The plural
+// /v2/sites/{uid}/patches this used to call does not exist and 404'd.
 export function getSitePatches(creds: DattoCredentials, siteUid: string): Promise<PatchesResponse> {
-  return fetchPatches(creds, `/v2/sites/${encodeURIComponent(siteUid)}/patches`);
+  return fetchPatches(creds, `/v2/site/${encodeURIComponent(siteUid)}/patches`);
 }
