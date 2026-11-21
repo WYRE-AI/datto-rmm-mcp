@@ -12,7 +12,7 @@
  */
 
 import { it, expect, vi, afterEach } from "vitest";
-import { getDevicePatches } from "../src/patches.js";
+import { getDevicePatches, getSitePatches } from "../src/patches.js";
 import type { DattoCredentials } from "../src/mcp-server.js";
 
 function tokenResponse(accessToken: string) {
@@ -128,4 +128,22 @@ it("does not include the raw OAuth error response body in the thrown error", asy
   await expect(getDevicePatches(creds, "device-1")).rejects.not.toThrow(
     new RegExp(sensitiveBody.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
   );
+});
+
+it("getSitePatches calls the singular /v2/site/{uid}/patches route (WYREAI-805)", async () => {
+  const creds: DattoCredentials = { platform: "vidal", apiKey: "site-route-key", apiSecretKey: "s" };
+  const urls: string[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string | URL) => {
+      const href = url.toString();
+      if (href.endsWith("/auth/oauth/token")) return tokenResponse("t");
+      urls.push(href);
+      return patchesResponse();
+    })
+  );
+
+  await getSitePatches(creds, "site-1");
+
+  expect(urls).toEqual(["https://vidal-api.centrastage.net/api/v2/site/site-1/patches"]);
 });
