@@ -47,7 +47,7 @@ MCP server for Datto RMM, enabling Claude to interact with your Datto RMM accoun
 
 ### Via MCP Gateway (Recommended)
 
-This server is designed to work with the [MCP Gateway](https://github.com/wyre-technology/mcp-gateway) which handles authentication and credential management.
+This server is designed to work with the [MCP Gateway](https://github.com/WYRE-AI/mcp-gateway) which handles authentication and credential management.
 
 On HTTP, the gateway proves it is the caller with `X-Gateway-S2S`. The value is `t=<unix seconds>,v1=<hex hmac-sha256>`. The MAC is HMAC-SHA256 over the ASCII string `t=<unix seconds>` (the same prefix that appears in the header), keyed with `CONDUIT_S2S_SECRET`. The timestamp must be within 300 seconds of the server clock. A missing or invalid header is `401`. The secret is never written to logs.
 
