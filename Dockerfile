@@ -56,7 +56,8 @@ COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/node_modules ./node_modules
 
 # Clean npm cache
-RUN npm cache clean --force
+# Remove the bundled npm CLI (unused at runtime; its vendored deps trigger scanner alerts)
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 
 # Create logs directory
 RUN mkdir -p /app/logs && chown -R datto:datto /app
