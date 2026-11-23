@@ -10,8 +10,8 @@
  * has a value with "[hidden]", so the caller can still see that it is set. Empty (null)
  * UDFs stay null. Unset or empty `DATTO_HIDDEN_UDFS` changes nothing.
  *
- * This hides values in tool output only. It does not stop a caller from writing a listed
- * UDF with `datto_set_device_udf`.
+ * Writes are handled separately: `datto_set_device_udf` refuses to write a listed UDF
+ * (refuseHiddenUdfs in udf.ts).
  */
 
 export const HIDDEN = "[hidden]";

@@ -22,7 +22,6 @@ import {
   type Component,
   type Device,
   type Platform,
-  type QuickJobRequest,
 } from "@wyre-ai/node-datto-rmm";
 import { elicitSelection } from "./utils/elicitation.js";
 import {
@@ -35,11 +34,19 @@ import {
 } from "./alert-card.js";
 import { ALERT_CARD_HTML } from "./generated/alert-card-html.js";
 import { dattoApiGet, getDevicePatches, getSitePatches } from "./patches.js";
-import { parseDeviceUid, parseUdfFields } from "./udf.js";
+import { MAX_UDF_VALUE_LENGTH, parseDeviceUid, parseUdfFields, refuseHiddenUdfs } from "./udf.js";
 import { listDeviceJobs } from "./device-jobs.js";
 import { rateLimitDetails } from "./rate-limit.js";
 import { siteHardware, siteHardwareConfig, DEFAULT_MAX_DEVICES, SITE_DEVICE_LIST_LIMIT } from "./site-hardware.js";
 import { hiddenUdfKeys, redactUdfs } from "./udf-redact.js";
+import {
+  WriteValidationError,
+  dattoApiWrite,
+  onlyKeys,
+  requireJobName,
+  requireUid,
+  validateQuickJobVariables,
+} from "./writes.js";
 import {
   applyUntrustedContentMarkers,
   markersEnabled,
@@ -355,6 +362,48 @@ function toComponentMatch(component: Component): ComponentMatch {
 }
 
 // ---------------------------------------------------------------------------
+// Lookups that run before a write
+// ---------------------------------------------------------------------------
+
+/** True for a 404 from the SDK, whichever error class it used. */
+function isNotFound(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    ((error as { statusCode?: unknown }).statusCode === 404 ||
+      (error as { name?: unknown }).name === "DattoRmmNotFoundError")
+  );
+}
+
+/**
+ * The component with this UID from the account catalogue. A quick job can
+ * only run a component found here, so no free-form script can be sent.
+ * Reads the catalogue page by page and stops at the match.
+ */
+async function findComponent(client: DattoRmmClient, componentUid: string): Promise<Component> {
+  for await (const component of client.account.componentsAll()) {
+    if (component.uid === componentUid) return component;
+  }
+  throw new WriteValidationError(
+    `No component with UID ${componentUid} in this account. Find one with datto_list_components. Nothing was run.`
+  );
+}
+
+/** The device, or a clear "no such device" error (nothing is written). */
+async function getDeviceForWrite(client: DattoRmmClient, deviceUid: string): Promise<Device> {
+  try {
+    const device = await client.devices.get(deviceUid);
+    if (!device || typeof device !== "object") throw new Error("empty response");
+    return device;
+  } catch (error) {
+    if (isNotFound(error) || (error instanceof Error && error.message === "empty response")) {
+      throw new WriteValidationError(`No device with UID ${deviceUid}. Nothing was changed.`);
+    }
+    throw error;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Quick job payload shape
 // ---------------------------------------------------------------------------
 
@@ -370,14 +419,11 @@ function toComponentMatch(component: Component): ComponentMatch {
  *
  *   { jobName, jobComponent: { componentUid, variables: [{name, value}] } }
  *
- * The SDK's `createQuickJob` forwards the request body verbatim, so this
- * nested shape works at runtime today even though the library's exported
- * `QuickJobRequest` type is still the wrong flat one. A fix to the library
- * itself is pending upstream but not yet published. Once
- * `@wyre-ai/node-datto-rmm` publishes the corrected type, remove this local
- * interface and the `as unknown as QuickJobRequest` cast at the call site
- * below — do NOT "simplify" the payload back to the flat shape, it will
- * start failing against the real API again.
+ * The library's exported `QuickJobRequest` type is still the wrong flat one,
+ * and quick jobs are now sent with `dattoApiWrite` (writes.ts) rather than
+ * the SDK's `createQuickJob`, so the SDK never retries one. Do NOT
+ * "simplify" the payload back to the flat shape, it will start failing
+ * against the real API again.
  */
 interface QuickJobRequestBody {
   jobName: string;
@@ -611,7 +657,9 @@ export function createMcpServer(
         },
         {
           name: "datto_resolve_alert",
-          description: "Resolve an alert by its UID",
+          description:
+            "WRITE: resolve an open alert by its UID. Cannot be undone from the API. Sent once, never retried; a rate limit returns error_type rate_limited with retry_after_seconds.",
+          annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
           _meta: ALERT_CARD_META,
           inputSchema: {
             type: "object",
@@ -622,6 +670,7 @@ export function createMcpServer(
               },
             },
             required: ["alertUid"],
+            additionalProperties: false,
           },
         },
         {
@@ -678,7 +727,8 @@ export function createMcpServer(
         {
           name: "datto_run_quickjob",
           description:
-            "Run a quick job on a device. Returns a job UID — pass it to datto_get_job, datto_get_job_components, datto_get_job_results, datto_get_job_stdout, and datto_get_job_stderr to check the job's status and retrieve its output, since this call itself is fire-and-forget.",
+            "WRITE: run an existing Datto RMM component on one device as a quick job. componentUid must be a component in the account catalogue (find it with datto_list_components); there is no way to send a free-form script. variables may only use names the component declares, as strings (booleans \"true\"/\"false\"). Datto runs quick jobs per device, so pass the device; pass siteUid too to have the job refused if the device is not in that site. Sent once, never retried; a rate limit returns error_type rate_limited with retry_after_seconds. Returns a job UID — pass it to datto_get_job, datto_get_job_components, datto_get_job_results, datto_get_job_stdout, and datto_get_job_stderr to follow the job, since this call itself is fire-and-forget.",
+          annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
           inputSchema: {
             type: "object",
             properties: {
@@ -686,21 +736,26 @@ export function createMcpServer(
                 type: "string",
                 description: "The device UID to run the job on",
               },
+              siteUid: {
+                type: "string",
+                description: "Optional. The site the device must be in; the job is refused if it is not.",
+              },
               jobName: {
                 type: "string",
-                description: "Name for the quick job",
+                description: "Name for the quick job (at most 100 characters)",
               },
               componentUid: {
                 type: "string",
-                description: "UID of the component to run",
+                description: "UID of an existing component (from datto_list_components)",
               },
               variables: {
                 type: "object",
-                description: "Variables to pass to the job (key-value pairs)",
+                description: "Component variables by name (only names the component declares), string values",
                 additionalProperties: { type: "string" },
               },
             },
             required: ["deviceUid", "jobName", "componentUid"],
+            additionalProperties: false,
           },
         },
         {
@@ -912,7 +967,8 @@ export function createMcpServer(
         {
           name: "datto_set_device_udf",
           description:
-            "Sets user-defined fields (UDF1-UDF300) on a device. Only the fields you send change; omitted UDFs keep their current values. An empty string deletes a field.",
+            "WRITE: sets user-defined fields (UDF1-UDF300) on a device. Only the fields you send change; omitted UDFs keep their current values. An empty string deletes a field. The device is checked first. UDFs listed in this server's DATTO_HIDDEN_UDFS are refused. The result lists which UDFs were set or cleared, not their values. Sent once, never retried; a rate limit returns error_type rate_limited with retry_after_seconds.",
+          annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
           inputSchema: {
             type: "object",
             properties: {
@@ -923,11 +979,12 @@ export function createMcpServer(
               udf: {
                 type: "object",
                 description:
-                  'UDF values keyed udf1 through udf300, e.g. { "udf3": "Finance" }',
+                  `UDF values keyed udf1 through udf300 (at most ${MAX_UDF_VALUE_LENGTH} characters each), e.g. { "udf3": "Finance" }`,
                 additionalProperties: { type: "string" },
               },
             },
             required: ["deviceUid", "udf"],
+            additionalProperties: false,
           },
         },
       ],
@@ -1166,8 +1223,13 @@ export function createMcpServer(
         }
 
         case "datto_resolve_alert": {
-          const { alertUid } = args as { alertUid: string };
-          const result = await client.alerts.resolve(alertUid);
+          const input = onlyKeys(args, ["alertUid"]);
+          const alertUid = requireUid(input.alertUid, "alertUid");
+          const result = await dattoApiWrite(
+            creds,
+            "POST",
+            `/v2/alert/${encodeURIComponent(alertUid)}/resolve`
+          );
           return {
             content: [
               { type: "text", text: JSON.stringify(result ?? {}, null, 2) },
@@ -1238,36 +1300,45 @@ export function createMcpServer(
         }
 
         case "datto_run_quickjob": {
-          const { deviceUid, jobName, componentUid, variables } = args as {
-            deviceUid: string;
-            jobName: string;
-            componentUid: string;
-            variables?: Record<string, string>;
-          };
+          const input = onlyKeys(args, ["deviceUid", "siteUid", "jobName", "componentUid", "variables"]);
+          const deviceUid = requireUid(input.deviceUid, "deviceUid");
+          const componentUid = requireUid(input.componentUid, "componentUid");
+          const jobName = requireJobName(input.jobName);
+          const siteUid =
+            input.siteUid === undefined ? undefined : requireUid(input.siteUid, "siteUid");
+
+          // Only a component from the account catalogue can run: no free-form
+          // script, and every variable must be one it declares.
+          const component = await findComponent(client, componentUid);
+          const variables = validateQuickJobVariables(input.variables, component as RawComponent);
+          const device = await getDeviceForWrite(client, deviceUid);
+          if (siteUid && device.siteUid !== siteUid) {
+            throw new WriteValidationError(
+              `Device ${deviceUid} is not in site ${siteUid}; it is in site ${device.siteUid ?? "unknown"}. Nothing was run.`
+            );
+          }
 
           // Public inputSchema keeps `variables` as a friendly key/value map
-          // (a nicer calling convention for an LLM) — convert to the array
-          // of {name, value} pairs the live API actually requires. See the
-          // QuickJobRequestBody comment above for why this nesting exists.
+          // (a nicer calling convention for an LLM) — validateQuickJobVariables
+          // converts it to the array of {name, value} pairs the live API
+          // requires. See the QuickJobRequestBody comment above for why this
+          // nesting exists.
           const jobRequest: QuickJobRequestBody = {
             // Datto records the API account as the job's creator and offers no
             // way to override it, so the caller's identity goes in the name -
             // the one field that reaches the console's activity list. No-op
             // when no gateway supplied one.
             jobName: attributeJobName(jobName, requestContext?.callerUpn),
-            jobComponent: {
-              componentUid,
-              variables: Object.entries(variables ?? {}).map(
-                ([name, value]) => ({ name, value })
-              ),
-            },
+            jobComponent: { componentUid, variables },
           };
 
-          const result = await client.devices.createQuickJob(
-            deviceUid,
-            // The published library type for this parameter is the wrong
-            // flat shape — see the QuickJobRequestBody comment above.
-            jobRequest as unknown as QuickJobRequest
+          // Sent once with fetch, not through the SDK: the SDK retries a 5xx,
+          // which for a quick job could start it twice (see writes.ts).
+          const result = await dattoApiWrite(
+            creds,
+            "PUT",
+            `/v2/device/${encodeURIComponent(deviceUid)}/quickjob`,
+            jobRequest
           );
           return {
             content: [
@@ -1456,21 +1527,29 @@ Partial result:
         }
 
         case "datto_set_device_udf": {
-          const { deviceUid, udf } = args as {
-            deviceUid: string;
-            udf: unknown;
-          };
-          const uid = parseDeviceUid(deviceUid);
-          const fields = parseUdfFields(udf);
-          // Datto documents a bare 200 with no body for this endpoint, so
-          // confirm from the validated inputs rather than the response.
-          await client.devices.setUdf(uid, fields);
+          const input = onlyKeys(args, ["deviceUid", "udf"]);
+          const uid = parseDeviceUid(input.deviceUid);
+          const fields = parseUdfFields(input.udf);
+          // UDFs listed in DATTO_HIDDEN_UDFS hold secrets: refused (opt-in;
+          // unset refuses nothing). Checked before any request is sent.
+          refuseHiddenUdfs(fields, hiddenUdfKeys());
+          await getDeviceForWrite(client, uid);
+          // Sent once with fetch, not the SDK (which retries a 5xx). Datto
+          // documents a bare 200 with no body for this endpoint, so confirm
+          // from the validated inputs: which UDFs changed, not their values,
+          // so values (which may be sensitive) stay out of tool results.
+          await dattoApiWrite(creds, "POST", `/v2/device/${encodeURIComponent(uid)}/udf`, fields);
+          const keys = Object.keys(fields) as (keyof typeof fields)[];
           return {
             content: [
               {
                 type: "text",
                 text: JSON.stringify(
-                  { deviceUid: uid, updated: fields },
+                  {
+                    deviceUid: uid,
+                    set: keys.filter((k) => fields[k] !== ""),
+                    cleared: keys.filter((k) => fields[k] === ""),
+                  },
                   null,
                   2
                 ),

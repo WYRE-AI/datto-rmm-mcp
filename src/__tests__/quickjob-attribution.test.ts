@@ -31,6 +31,22 @@ function stubQuickJob(capture: { body?: unknown }) {
         headers: { "Content-Type": "application/json" },
       });
     }
+    // The checks that run before a quick job: the component exists, the device exists.
+    if (url.endsWith("/api/v2/account/components") && (init?.method ?? "GET") === "GET") {
+      return new Response(
+        JSON.stringify({
+          pageDetails: { nextPageUrl: null },
+          components: [{ uid: "component-1", name: "Restart Service", variables: [] }],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    }
+    if (url.endsWith("/api/v2/device/device-1") && (init?.method ?? "GET") === "GET") {
+      return new Response(JSON.stringify({ uid: "device-1", siteUid: "site-1" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
     if (url.includes("/quickjob") && init?.method === "PUT") {
       capture.body = JSON.parse(String(init.body));
       return new Response(

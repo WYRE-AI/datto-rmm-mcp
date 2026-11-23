@@ -36,7 +36,7 @@ import {
   retryAfterSeconds,
 } from "./rate-limit.js";
 
-const PLATFORM_URLS: Record<Platform, string> = {
+export const PLATFORM_URLS: Record<Platform, string> = {
   pinotage: "https://pinotage-api.centrastage.net",
   merlot: "https://merlot-api.centrastage.net",
   concord: "https://concord-api.centrastage.net",
@@ -97,7 +97,7 @@ function tokenCacheKey(creds: DattoCredentials): string {
   return `${creds.platform}:${creds.apiKey}:${secretDigest}`;
 }
 
-async function getAccessToken(creds: DattoCredentials): Promise<string> {
+export async function getAccessToken(creds: DattoCredentials): Promise<string> {
   const apiUrl = PLATFORM_URLS[creds.platform];
   const cacheKey = tokenCacheKey(creds);
 
@@ -233,4 +233,9 @@ export function getDevicePatches(creds: DattoCredentials, deviceUid: string): Pr
 // /v2/sites/{uid}/patches this used to call does not exist and 404'd.
 export function getSitePatches(creds: DattoCredentials, siteUid: string): Promise<PatchesResponse> {
   return fetchPatches(creds, `/v2/site/${encodeURIComponent(siteUid)}/patches`);
+}
+
+/** Drops this credential set's cached token, so the next call fetches a fresh one. */
+export function forgetAccessToken(creds: DattoCredentials): void {
+  tokenCache.delete(tokenCacheKey(creds));
 }
