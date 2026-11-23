@@ -5,9 +5,17 @@
  * Datto RMM host stubbed, and check that a 429 makes exactly one request and
  * the tool error says "HTTP 429" and "Try again in N s.".
  */
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import worker from "../worker.js";
-import { describeError, isRateLimitError, rateLimitDetails, retryAfterSeconds } from "../rate-limit.js";
+import {
+  describeError,
+  ipBlockSuspected,
+  isRateLimitError,
+  noteRateLimited,
+  rateLimitDetails,
+  resetRateLimitState,
+  retryAfterSeconds,
+} from "../rate-limit.js";
 
 const DATTO_HOST = "https://concord-api.centrastage.net";
 const ENV = { DATTO_API_KEY: "test-key", DATTO_API_SECRET: "test-secret" };
@@ -16,6 +24,10 @@ const JOB_A = "a1000000-0000-4000-8000-000000000001";
 const JOB_B = "a2000000-0000-4000-8000-000000000002";
 
 const realFetch = globalThis.fetch;
+
+beforeEach(() => {
+  resetRateLimitState();
+});
 
 afterEach(() => {
   globalThis.fetch = realFetch;
@@ -161,6 +173,8 @@ describe("describeError", () => {
       statusCode: 429,
     });
     expect(describeError(sayWait)).toBe(sayWait.message);
+    // That 429 starts the IP-block cooldown; outside it a bare 403 is a permissions error.
+    resetRateLimitState();
     const forbidden = Object.assign(new Error("Access forbidden (403): no scope"), { statusCode: 403 });
     expect(isRateLimitError(forbidden)).toBe(false);
     expect(describeError(forbidden)).toBe("Access forbidden (403): no scope");
@@ -205,7 +219,7 @@ describe("rateLimitDetails", () => {
     const blocked = Object.assign(new Error("IP blocked"), { name: "DattoRmmIpBlockedError", statusCode: 403, cooldownMs: 300_000 });
     expect(rateLimitDetails(blocked).retryAfterSeconds).toBe(300);
     const zero = Object.assign(new Error("HTTP 429. Try again in 0 s."), { statusCode: 429 });
-    expect(rateLimitDetails(zero).retryAfterSeconds).toBe(1);
+    expect(rateLimitDetails(zero)).toEqual({ message: "HTTP 429. Try again in 1 s.", retryAfterSeconds: 1 });
     expect(rateLimitDetails(new Error("plain")).retryAfterSeconds).toBeUndefined();
   });
 });
@@ -219,5 +233,110 @@ describe("retryAfterSeconds", () => {
     expect(retryAfterSeconds(null, now)).toBeUndefined();
     expect(retryAfterSeconds("soon", now)).toBeUndefined();
     expect(retryAfterSeconds("-3", now)).toBeUndefined();
+  });
+});
+
+describe("a stated wait below 1 s", () => {
+  it("says 1 s in the text and in retry_after_seconds", () => {
+    const zero = Object.assign(new Error("Datto RMM rate-limited the request (HTTP 429). Try again in 0 s. Detail: /x"), {
+      statusCode: 429,
+    });
+    const { message, retryAfterSeconds: n } = rateLimitDetails(zero);
+    expect(message).toContain("Try again in 1 s.");
+    expect(message).not.toContain("Try again in 0 s.");
+    expect(n).toBe(1);
+  });
+});
+
+type ToolResult = {
+  content?: { text?: string }[];
+  isError?: boolean;
+  structuredContent?: { error_type?: string; retry_after_seconds?: number };
+};
+
+async function toolResult(name: string, args: Record<string, unknown>): Promise<ToolResult | undefined> {
+  return ((await (await call(name, args)).json()) as { result?: ToolResult }).result;
+}
+
+const forbidden = (body: string, contentType = "text/plain") =>
+  new Response(body, { status: 403, headers: { "Content-Type": contentType } });
+
+describe("IP-block 403 on a direct call", () => {
+  const PATCHES = `${DATTO_HOST}/api/v2/device/${DEVICE}/patches`;
+
+  it("is reported as a rate limit when the body says the IP is blocked", async () => {
+    const seen = stubFetch((url) => (url.startsWith(PATCHES) ? forbidden("IP blocked due to rate limit violations") : undefined));
+    const result = await toolResult("datto_get_device_patches", { deviceUid: DEVICE });
+    expect(seen).toHaveLength(1);
+    expect(result?.isError).toBe(true);
+    expect(result?.content?.[0]?.text).toContain("blocked this IP after rate-limit violations (HTTP 403 Forbidden). Not retried. Try again in 300 s.");
+    expect(result?.structuredContent).toEqual({ error_type: "rate_limited", retry_after_seconds: 300 });
+  });
+
+  it("is reported as a rate limit during the cooldown after a 429, even with a bare body", async () => {
+    stubFetch((url) => (url.startsWith(PATCHES) ? tooMany({ "Retry-After": "30" }) : undefined));
+    await toolResult("datto_get_device_patches", { deviceUid: DEVICE });
+    expect(ipBlockSuspected()).toBe(true);
+
+    stubFetch((url) => (url.startsWith(PATCHES) ? forbidden("Forbidden") : undefined));
+    const result = await toolResult("datto_get_device_patches", { deviceUid: DEVICE });
+    expect(result?.content?.[0]?.text).toContain("(HTTP 403 Forbidden)");
+    expect(result?.structuredContent).toEqual({ error_type: "rate_limited", retry_after_seconds: 300 });
+  });
+
+  it("leaves a permissions 403 alone when no rate limit has been seen", async () => {
+    stubFetch((url) => (url.startsWith(PATCHES) ? forbidden("Forbidden") : undefined));
+    const result = await toolResult("datto_get_device_patches", { deviceUid: DEVICE });
+    expect(result?.isError).toBe(true);
+    expect(result?.content?.[0]?.text).toContain("Datto RMM API error: 403");
+    expect(result?.structuredContent).toBeUndefined();
+  });
+});
+
+describe("IP-block 403 through the SDK", () => {
+  const JOB = `${DATTO_HOST}/api/v2/job/job-123`;
+
+  it("is a rate limit when a plain-text body says the IP is blocked", async () => {
+    stubFetch((url) => (url === JOB ? forbidden("Your IP has been blocked") : undefined));
+    const result = await toolResult("datto_get_job", { jobUid: "job-123" });
+    expect(result?.structuredContent).toEqual({ error_type: "rate_limited", retry_after_seconds: 300 });
+  });
+
+  it("is a rate limit during the cooldown after a 429, and a permissions error otherwise", async () => {
+    stubFetch((url) => (url === JOB ? jsonResponse({ message: "Forbidden" }, 403) : undefined));
+    expect((await toolResult("datto_get_job", { jobUid: "job-123" }))?.structuredContent).toBeUndefined();
+
+    noteRateLimited();
+    const result = await toolResult("datto_get_job", { jobUid: "job-123" });
+    expect(result?.content?.[0]?.text).toContain("(HTTP 403 Forbidden). Try again in 300 s.");
+    expect(result?.structuredContent).toEqual({ error_type: "rate_limited", retry_after_seconds: 300 });
+  });
+
+  it("ends datto_list_device_jobs at the first IP-block 403 instead of looking up the other jobs", async () => {
+    noteRateLimited();
+    const now = Math.floor(Date.now() / 1000);
+    const seen = stubFetch((url) => {
+      if (url.startsWith(`${DATTO_HOST}/api/v2/activity-logs?`)) {
+        return jsonResponse({
+          pageDetails: { count: 2, nextPageUrl: null },
+          activities: [activity(JOB_A, now - 60), activity(JOB_B, now - 120)],
+        });
+      }
+      if (url.includes("/results/")) return jsonResponse({ message: "Forbidden" }, 403);
+      return undefined;
+    });
+
+    const result = await toolResult("datto_list_device_jobs", { deviceUid: DEVICE });
+    expect(seen.filter((u) => u.includes("/results/"))).toHaveLength(1);
+    expect(result?.structuredContent).toEqual({ error_type: "rate_limited", retry_after_seconds: 300 });
+  });
+
+  it("a bare 403 outside the cooldown is not a rate limit", () => {
+    const err = Object.assign(new Error("Access forbidden (403): Forbidden"), { statusCode: 403, response: { message: "Forbidden" } });
+    expect(isRateLimitError(err)).toBe(false);
+    noteRateLimited(60, Date.now() - 61_000);
+    expect(isRateLimitError(err)).toBe(false);
+    noteRateLimited();
+    expect(isRateLimitError(err)).toBe(true);
   });
 });
