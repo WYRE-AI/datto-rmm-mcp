@@ -25,7 +25,7 @@
 import type { Platform } from "@wyre-ai/node-datto-rmm";
 import type { DattoCredentials } from "./mcp-server.js";
 
-const PLATFORM_URLS: Record<Platform, string> = {
+export const PLATFORM_URLS: Record<Platform, string> = {
   pinotage: "https://pinotage-api.centrastage.net",
   merlot: "https://merlot-api.centrastage.net",
   concord: "https://concord-api.centrastage.net",

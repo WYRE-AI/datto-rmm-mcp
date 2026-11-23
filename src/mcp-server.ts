@@ -34,6 +34,14 @@ import {
   buildAlertCard,
 } from "./alert-card.js";
 import { ALERT_CARD_HTML } from "./generated/alert-card-html.js";
+import {
+  ACTIVITY_RETENTION_DAYS,
+  DEFAULT_ACTIVITY_LOOKBACK_DAYS,
+  DEFAULT_MAX_ACTIVITIES,
+  MAX_MAX_ACTIVITIES,
+  listActivityLogs,
+  type ListActivityLogsOptions,
+} from "./activity-logs.js";
 import { getDevicePatches, getSitePatches } from "./patches.js";
 import { parseDeviceUid, parseUdfFields } from "./udf.js";
 import { listDeviceJobs } from "./device-jobs.js";
@@ -775,6 +783,80 @@ export function createMcpServer(
           },
         },
         {
+          name: "datto_list_activity_logs",
+          description:
+            "Search the Datto RMM Activity Log: who did what, and when. Use it for questions like \"when did user X last log in to Datto RMM\" or \"what did user X do this week\" - " +
+            "logins, password/2FA resets, jobs and components run, devices moved or deleted, policies deployed, remote takeover and Web Remote sessions, filter changes and more. " +
+            `Newest first. Defaults to the last ${DEFAULT_ACTIVITY_LOOKBACK_DAYS} days (until = now); Datto keeps ${ACTIVITY_RETENTION_DAYS} days. ` +
+            "Filter by user (username or first/last name of the RMM user who did the action), userId, entity (\"user\" for account activity such as logins, \"device\" for activity on devices), " +
+            "category, action, siteId (the numeric id from datto_list_sites) or hostname. For a user's logins, pass user and entity \"user\": each result includes a summary of category/action counts, " +
+            "so the exact category and action names can be read from a first call and used to narrow the next. Each row has the time (UTC), entity, category, action, user, userId, site, hostname and compact details. " +
+            "Pass the returned userId instead of user to filter server-side, which is faster on a busy account. When the result has nextCursor, call again with only cursor to continue. " +
+            "User activity is only visible when the API user has the Administrator security level.",
+          annotations: { readOnlyHint: true },
+          inputSchema: {
+            type: "object",
+            properties: {
+              from: {
+                type: "string",
+                description: `Start of the window, ISO 8601 date or date-time (UTC if no offset), e.g. 2026-11-01. Defaults to ${DEFAULT_ACTIVITY_LOOKBACK_DAYS} days before until.`,
+              },
+              until: {
+                type: "string",
+                description: "End of the window, ISO 8601 date or date-time. Defaults to now.",
+              },
+              user: {
+                type: "string",
+                description: "Case-insensitive part of the username or first/last name of the RMM user who did the action.",
+              },
+              userId: {
+                type: "number",
+                description: "Datto's numeric user id (the userId on a row from an earlier call). Filtered by Datto, so faster than user.",
+              },
+              entity: {
+                type: "string",
+                enum: ["user", "device"],
+                description: "\"user\" for account activity (logins, user and settings changes), \"device\" for activity on devices (jobs, moves, remote sessions).",
+              },
+              category: {
+                type: "string",
+                description: "Category, or several comma-separated, as shown in a row's category (e.g. job, device).",
+              },
+              action: {
+                type: "string",
+                description: "Action, or several comma-separated, as shown in a row's action (e.g. deployment, note).",
+              },
+              siteId: {
+                type: "number",
+                description: "Numeric site id (the id field from datto_list_sites or datto_get_site, not the site UID).",
+              },
+              hostname: {
+                type: "string",
+                description: "Only activity on the device with this exact hostname.",
+              },
+              search: {
+                type: "string",
+                description: "Advanced: an Activity Log search query (Lucene syntax), e.g. site.name:\"Head Office\".",
+              },
+              order: {
+                type: "string",
+                enum: ["desc", "asc"],
+                description: "desc (newest first, default) or asc.",
+                default: "desc",
+              },
+              max: {
+                type: "number",
+                description: `Maximum rows to return (default ${DEFAULT_MAX_ACTIVITIES}, max ${MAX_MAX_ACTIVITIES}).`,
+                default: DEFAULT_MAX_ACTIVITIES,
+              },
+              cursor: {
+                type: "string",
+                description: "nextCursor from an earlier call, to get the next rows. The other filters are then ignored (the cursor keeps them).",
+              },
+            },
+          },
+        },
+        {
           name: "datto_get_device_audit",
           description:
             "Get audit data for a device (hardware, software, OS information)",
@@ -1276,6 +1358,14 @@ export function createMcpServer(
             content: [
               { type: "text", text: JSON.stringify(result, null, 2) },
             ],
+          };
+        }
+
+        // Read directly, like datto_list_device_jobs (see activity-logs.ts).
+        case "datto_list_activity_logs": {
+          const result = await listActivityLogs(creds, (args ?? {}) as ListActivityLogsOptions);
+          return {
+            content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
           };
         }
 

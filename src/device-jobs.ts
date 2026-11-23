@@ -69,13 +69,14 @@ const RAN_ON_SKEW_MS = 30 * 1000;
 export const DEVICE_UID_RE = /^[A-Za-z0-9-]{1,64}$/;
 
 /** Activity-log row, as documented in the v2 Swagger spec. */
-interface ActivityLog {
+export interface ActivityLog {
   id?: string;
   entity?: string;
   category?: string;
   action?: string;
   /** Unix seconds with a fractional part ("seconds.nanoseconds"). */
   date?: number | string;
+  site?: { id?: number; name?: string } | null;
   deviceId?: number;
   hostname?: string;
   user?: {
@@ -89,7 +90,7 @@ interface ActivityLog {
   hasStdErr?: boolean;
 }
 
-interface ActivityLogsPage {
+export interface ActivityLogsPage {
   pageDetails?: { nextPageUrl?: string | null };
   activities?: ActivityLog[];
   /** Set when the request fails at Datto's database layer. */
@@ -159,7 +160,7 @@ export interface ListDeviceJobsOptions {
 }
 
 /** `yyyy-MM-ddTHH:mm:ssZ` - the format the endpoint documents (no millis). */
-function toApiDate(d: Date): string {
+export function toApiDate(d: Date): string {
   return d.toISOString().replace(/\.\d{3}Z$/, "Z");
 }
 
@@ -168,7 +169,7 @@ function toApiDate(d: Date): string {
  *  are already parsed as UTC by `Date`. */
 const OFFSET_FREE_DATE_TIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?$/;
 
-function parseDateInput(value: string, field: string): Date {
+export function parseDateInput(value: string, field: string): Date {
   const trimmed = value.trim();
   const d = new Date(OFFSET_FREE_DATE_TIME_RE.test(trimmed) ? `${trimmed}Z` : trimmed);
   if (Number.isNaN(d.getTime())) {
@@ -177,7 +178,7 @@ function parseDateInput(value: string, field: string): Date {
   return d;
 }
 
-function activityTimeMs(date: ActivityLog["date"]): number | undefined {
+export function activityTimeMs(date: ActivityLog["date"]): number | undefined {
   if (date === undefined || date === null) return undefined;
   const seconds = Number(date);
   return Number.isFinite(seconds) ? Math.round(seconds * 1000) : undefined;
@@ -192,7 +193,7 @@ function ranOnMs(ranOn: JobResults["ranOn"]): number | undefined {
   return Number.isNaN(parsed) ? undefined : parsed;
 }
 
-function parseDetails(details: ActivityLog["details"]): Record<string, unknown> | undefined {
+export function parseDetails(details: ActivityLog["details"]): Record<string, unknown> | undefined {
   if (!details) return undefined;
   if (typeof details === "object") return details;
   try {
