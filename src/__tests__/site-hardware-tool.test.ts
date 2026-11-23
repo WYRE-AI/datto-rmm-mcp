@@ -3,15 +3,19 @@
  * Datto RMM host stubbed: a rate limit partway through must come back as a rate-limit error
  * that keeps the rows already read, inside the untrusted-data boundary.
  */
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import worker from "../worker.js";
 import { sharedAuditPacer } from "../site-hardware.js";
-import { resetRateLimitState } from "../rate-limit.js";
+import { noteRateLimited, resetRateLimitState } from "../rate-limit.js";
 
 const DATTO_HOST = "https://concord-api.centrastage.net";
 const ENV = { DATTO_API_KEY: "test-key", DATTO_API_SECRET: "test-secret" };
 const SITE = "00000000-0000-4000-8000-0000000000a1";
 const realFetch = globalThis.fetch;
+
+beforeEach(() => {
+  resetRateLimitState();
+});
 
 afterEach(() => {
   // The pacer and rate-limit cooldown are process-wide; a test that hits a 429 must not stop the next one.
@@ -298,5 +302,64 @@ describe("datto_site_hardware configuration", () => {
     hardwareResult(await rpc("tools/call", { name: "datto_site_hardware", arguments: { siteUid: SITE } }));
     expect(errors.mock.calls.flat().join(" ")).toMatch(/DATTO_SITE_HARDWARE_PAGE_SIZE="lots" is not a whole number/);
     errors.mockRestore();
+  });
+});
+
+describe("datto_site_hardware and an IP-block 403 from an SDK audit", () => {
+  /** Three devices; the second audit answers 403 with `blocked`. */
+  function stubBlocked(blocked: () => Response) {
+    const seen: string[] = [];
+    globalThis.fetch = vi.fn(async (input) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.startsWith(`${DATTO_HOST}/auth/oauth/token`)) {
+        return json({ access_token: "fake-token", token_type: "bearer", expires_in: 3600 });
+      }
+      seen.push(url);
+      if (url.startsWith(`${DATTO_HOST}/api/v2/site/${SITE}/devices`)) {
+        return json({
+          pageDetails: { count: 3, nextPageUrl: null },
+          devices: ["WS-00", "WS-01", "WS-02"].map((h, i) => ({ uid: `dev-${i}`, hostname: h })),
+        });
+      }
+      if (url === `${DATTO_HOST}/api/v2/audit/device/dev-1`) return blocked();
+      if (url.startsWith(`${DATTO_HOST}/api/v2/audit/device/`)) {
+        return json({ systemInfo: { manufacturer: "Acme", model: "M1" }, bios: { serialNumber: "SN" } });
+      }
+      throw new Error(`Unstubbed fetch in test: GET ${url}`);
+    }) as typeof fetch;
+    return seen;
+  }
+
+  async function run() {
+    const res = await worker.fetch(
+      new Request("http://worker.local/mcp", {
+        method: "POST",
+        headers: { Accept: "application/json, text/event-stream", "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: { name: "datto_site_hardware", arguments: { siteUid: SITE } },
+        }),
+      }),
+      ENV
+    );
+    return (await res.json()) as { result?: { isError?: boolean; structuredContent?: Record<string, unknown> } };
+  }
+
+  it("stops at a plain-text IP-block 403 instead of reading the next audit", async () => {
+    const seen = stubBlocked(() => new Response("IP blocked", { status: 403, headers: { "Content-Type": "text/plain" } }));
+    const body = await run();
+    expect(body.result?.isError).toBe(true);
+    expect(body.result?.structuredContent).toEqual({ error_type: "rate_limited", retry_after_seconds: 300 });
+    expect(seen.some((u) => u.endsWith("/audit/device/dev-2"))).toBe(false);
+  });
+
+  it("stops at a bare 403 during the cooldown after a 429", async () => {
+    noteRateLimited();
+    const seen = stubBlocked(() => json({ message: "Forbidden" }, 403));
+    const body = await run();
+    expect(body.result?.structuredContent).toEqual({ error_type: "rate_limited", retry_after_seconds: 300 });
+    expect(seen.some((u) => u.endsWith("/audit/device/dev-2"))).toBe(false);
   });
 });

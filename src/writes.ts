@@ -8,7 +8,8 @@
  * component Level above the API user's role). Every write here is therefore
  * sent exactly once with `fetch`:
  *   - 429: never retried; fails with "Try again in N s." (DattoRateLimitedError).
- *   - 403 that says the IP is blocked: never retried; reported as a rate limit.
+ *   - 403 that is the IP block (its body says so, or it arrives in the
+ *     cooldown after a 429): never retried; reported as a rate limit.
  *   - 401: never retried; the cached token is dropped so the NEXT call gets a
  *     fresh one, but this write is reported as failed, not re-sent.
  *   - 5xx and anything else: reported as failed, never re-sent.
@@ -26,9 +27,12 @@
 import type { DattoCredentials } from "./mcp-server.js";
 import { PLATFORM_URLS, forgetAccessToken, getAccessToken } from "./patches.js";
 import {
+  DattoIpBlockedError,
   DattoRateLimitedError,
-  IP_BLOCK_WAIT_SECONDS,
   RATE_LIMIT_WAIT_SECONDS,
+  ipBlockSuspected,
+  looksLikeIpBlock,
+  noteRateLimited,
   retryAfterSeconds,
 } from "./rate-limit.js";
 
@@ -41,22 +45,6 @@ export class WriteValidationError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "WriteValidationError";
-  }
-}
-
-/** Datto blocked this IP after rate-limit violations (HTTP 403). Duck-typed by rate-limit.ts. */
-export class DattoIpBlockedError extends Error {
-  readonly statusCode = 403;
-  readonly cooldownMs: number;
-
-  constructor(path: string, seconds: number = IP_BLOCK_WAIT_SECONDS) {
-    super(
-      `Datto RMM blocked this IP after rate-limit violations (HTTP 403 Forbidden). Not retried. ` +
-        `Try again in ${seconds} s. Detail: ${path}`
-    );
-    // rate-limit.ts recognises an IP block by this name.
-    this.name = "DattoRmmIpBlockedError";
-    this.cooldownMs = seconds * 1000;
   }
 }
 
@@ -95,6 +83,7 @@ export async function dattoApiWrite(
 
   if (response.status === 429) {
     await response.text();
+    noteRateLimited();
     throw new DattoRateLimitedError(
       path,
       retryAfterSeconds(response.headers.get("retry-after")) ?? RATE_LIMIT_WAIT_SECONDS
@@ -103,8 +92,10 @@ export async function dattoApiWrite(
 
   const text = await response.text();
 
-  if (response.status === 403 && /rate|blocked/i.test(text)) {
-    throw new DattoIpBlockedError(path);
+  if (response.status === 403) {
+    const confirmed = looksLikeIpBlock(text);
+    if (confirmed) noteRateLimited();
+    if (confirmed || ipBlockSuspected()) throw new DattoIpBlockedError(path);
   }
   if (response.status === 401) {
     forgetAccessToken(creds);

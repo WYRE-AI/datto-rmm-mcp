@@ -14,9 +14,10 @@
  * round-trips through the Worker entrypoint, only the Datto host stubbed.
  * All UIDs and values are made up.
  */
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import worker from "../worker.js";
 import { validateQuickJobVariables } from "../writes.js";
+import { resetRateLimitState } from "../rate-limit.js";
 
 const DATTO_HOST = "https://concord-api.centrastage.net";
 const ENV = { DATTO_API_KEY: "write-test-key", DATTO_API_SECRET: "write-test-secret" };
@@ -28,6 +29,10 @@ const WRITE_TOOLS = [
 ];
 
 const realFetch = globalThis.fetch;
+
+beforeEach(() => {
+  resetRateLimitState();
+});
 
 afterEach(() => {
   globalThis.fetch = realFetch;
@@ -276,17 +281,44 @@ describe("writes are sent once and never retried", () => {
     expect(result.structuredContent).toEqual({ error_type: "rate_limited", retry_after_seconds: 300 });
   });
 
-  it("a 500 on a quick job is not retried (the SDK would retry it once)", async () => {
-    const calls = stubDatto(() => json({ errorMessage: "boom" }, 500));
+  it("a bare 403 on a write is an IP block during the cooldown after a 429, and a plain error otherwise", async () => {
+    const forbidden = () => json({ message: "Forbidden" }, 403);
+    let calls = stubDatto(forbidden);
+    let result = await call("datto_resolve_alert", { alertUid: "alert-1" });
+    expect(calls.writes).toHaveLength(1);
+    expect(result.structuredContent).toBeUndefined();
+    expect(text(result)).toMatch(/HTTP 403.*Not retried/);
+
+    stubDatto(() => json({}, 429));
+    await call("datto_resolve_alert", { alertUid: "alert-1" });
+
+    calls = stubDatto(forbidden);
+    result = await call("datto_resolve_alert", { alertUid: "alert-1" });
+    expect(calls.writes).toHaveLength(1);
+    expect(result.structuredContent).toEqual({ error_type: "rate_limited", retry_after_seconds: 300 });
+  });
+
+  // The main reason writes bypass the SDK: it re-sends any request once after a
+  // 5xx, and Datto answers 500 for some quick jobs it has already started.
+  it.each([500, 502, 503, 504])("a %i on a quick job is sent once and never re-sent", async (status) => {
+    const calls = stubDatto(() => json({ errorMessage: "boom" }, status));
     const result = await call("datto_run_quickjob", {
       deviceUid: "device-1",
       jobName: "x",
       componentUid: "comp-novars",
     });
+    const quickJobPuts = calls.writes.filter(
+      (w) => w.method === "PUT" && w.url === `${DATTO_HOST}/api/v2/device/device-1/quickjob`
+    );
+    expect(quickJobPuts).toHaveLength(1);
     expect(calls.writes).toHaveLength(1);
     expect(result.isError).toBe(true);
-    expect(text(result)).toMatch(/HTTP 500.*Not retried/);
+    expect(text(result)).toMatch(new RegExp(`HTTP ${status}.*Not retried`));
     expect(result.structuredContent).toBeUndefined();
+
+    // Nothing is re-sent later either (the SDK waits 1 s before its retry).
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+    expect(calls.writes).toHaveLength(1);
   });
 
   it("a 401 on a write is not re-sent", async () => {
