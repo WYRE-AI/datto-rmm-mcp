@@ -24,6 +24,7 @@
 
 import type { Platform } from "@wyre-ai/node-datto-rmm";
 import type { DattoCredentials } from "./mcp-server.js";
+import { DattoRateLimitedError, RATE_LIMIT_WAIT_SECONDS, retryAfterSeconds } from "./rate-limit.js";
 
 const PLATFORM_URLS: Record<Platform, string> = {
   pinotage: "https://pinotage-api.centrastage.net",
@@ -49,6 +50,16 @@ const PLATFORM_URLS: Record<Platform, string> = {
 // not a hypothetical. apiKey uniquely identifies the credential set without
 // needing to hash in apiSecretKey too.
 const tokenCache = new Map<string, { accessToken: string; expiresAt: number }>();
+
+/** A 429 is reported, never retried (Datto blocks the IP when calls continue after one). */
+function throwIfRateLimited(response: Response, path: string): void {
+  if (response.status === 429) {
+    throw new DattoRateLimitedError(
+      path,
+      retryAfterSeconds(response.headers.get("retry-after")) ?? RATE_LIMIT_WAIT_SECONDS
+    );
+  }
+}
 
 function tokenCacheKey(creds: DattoCredentials): string {
   return `${creds.platform}:${creds.apiKey}`;
@@ -77,6 +88,7 @@ async function getAccessToken(creds: DattoCredentials): Promise<string> {
     }).toString(),
   });
 
+  throwIfRateLimited(response, "/auth/oauth/token");
   if (!response.ok) {
     // Drain the body (Datto's own OAuth error detail) without relaying it -
     // this can propagate straight through to an MCP tool-call result, and an
@@ -144,6 +156,7 @@ export async function dattoApiGet<T>(creds: DattoCredentials, pathOrUrl: string)
     headers: { Authorization: `Bearer ${token}` },
   });
 
+  throwIfRateLimited(response, new URL(url).pathname);
   if (response.status === 401) {
     // Token may have been invalidated server-side - retry once with a fresh
     // one. Only this credential set's entry, not the whole cache - other
@@ -154,6 +167,7 @@ export async function dattoApiGet<T>(creds: DattoCredentials, pathOrUrl: string)
     const retryResponse = await fetch(url, {
       headers: { Authorization: `Bearer ${retryToken}` },
     });
+    throwIfRateLimited(retryResponse, new URL(url).pathname);
     if (!retryResponse.ok) {
       throw new Error(`Datto RMM API error: ${retryResponse.status} ${retryResponse.statusText}`);
     }
