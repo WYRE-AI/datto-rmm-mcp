@@ -103,6 +103,8 @@ const DEFAULT_REASON =
  *   these return a vendor acknowledgement (a new job UID, a resolved
  *   status) or, for the UDF write, a confirmation built from the validated
  *   inputs — not content shaped by a device.
+ * - `datto_move_device`: returns the device and site UIDs and the site
+ *   names, which are set by RMM administrators, not by the device.
  * - `datto_get_device_patches` / `datto_get_site_patches`: patch titles, KB
  *   numbers, and severity come from Microsoft's WSUS catalog and are
  *   identical for every device regardless of what is running on the

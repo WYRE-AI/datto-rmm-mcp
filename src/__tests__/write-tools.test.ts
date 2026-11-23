@@ -1,6 +1,6 @@
 /**
  * Coverage for the write tools: datto_resolve_alert, datto_run_quickjob,
- * and datto_set_device_udf.
+ * datto_set_device_udf and datto_move_device.
  *
  * - Annotations: every write says readOnlyHint false (MCP clients and
  *   gateways can gate writes on it), every other tool says readOnlyHint true.
@@ -26,6 +26,7 @@ const WRITE_TOOLS = [
   "datto_resolve_alert",
   "datto_run_quickjob",
   "datto_set_device_udf",
+  "datto_move_device",
 ];
 
 const realFetch = globalThis.fetch;
@@ -142,13 +143,14 @@ describe("write tool annotations", () => {
     }
   });
 
-  it("marks quick jobs, UDF writes and alert resolution destructive", async () => {
+  it("marks quick jobs, UDF writes, moves and alert resolution destructive", async () => {
     const body = await rpc("tools/list", {});
     const tools = (body.result as { tools: { name: string; annotations?: Record<string, boolean> }[] })
       .tools;
     const hint = (n: string) => tools.find((t) => t.name === n)?.annotations?.destructiveHint;
     expect(hint("datto_run_quickjob")).toBe(true);
     expect(hint("datto_set_device_udf")).toBe(true);
+    expect(hint("datto_move_device")).toBe(true);
     expect(hint("datto_resolve_alert")).toBe(true);
   });
 });
@@ -396,6 +398,32 @@ describe("datto_resolve_alert", () => {
     expect(calls.writes).toEqual([
       { method: "POST", url: `${DATTO_HOST}/api/v2/alert/alert-1/resolve`, body: undefined },
     ]);
+  });
+});
+
+describe("datto_move_device", () => {
+  it("moves a device to another site", async () => {
+    const calls = stubDatto();
+    const result = await call("datto_move_device", { deviceUid: "device-1", siteUid: "site-b" });
+    expect(result.isError).toBeFalsy();
+    expect(calls.writes).toEqual([
+      { method: "PUT", url: `${DATTO_HOST}/api/v2/device/device-1/site/site-b`, body: undefined },
+    ]);
+    expect(JSON.parse(text(result))).toMatchObject({ fromSiteUid: "site-a", toSiteUid: "site-b" });
+  });
+
+  it("refuses a move to the site the device is already in", async () => {
+    const calls = stubDatto();
+    const result = await call("datto_move_device", { deviceUid: "device-1", siteUid: "site-a" });
+    expect(text(result)).toMatch(/already in site site-a/);
+    expect(calls.writes).toHaveLength(0);
+  });
+
+  it("refuses an unknown site", async () => {
+    const calls = stubDatto();
+    const result = await call("datto_move_device", { deviceUid: "device-1", siteUid: "site-zz" });
+    expect(text(result)).toMatch(/No site with UID site-zz/);
+    expect(calls.writes).toHaveLength(0);
   });
 });
 

@@ -139,8 +139,8 @@ Microsoft 365 Copilot / Copilot Studio) can use it to skip the per-call
 confirmation prompt for those tools. Tools that create, update, resolve, or
 run anything are never annotated as read-only.
 
-The write tools (`datto_resolve_alert`, `datto_run_quickjob`, `datto_set_device_udf`)
-carry `readOnlyHint: false` plus `destructiveHint`, `idempotentHint`
+The write tools (`datto_resolve_alert`, `datto_run_quickjob`, `datto_set_device_udf`,
+`datto_move_device`) carry `readOnlyHint: false` plus `destructiveHint`, `idempotentHint`
 and `openWorldHint`, so MCP clients and gateways can gate writes, for example behind a
 confirmation. Their arguments are checked before anything is sent, unknown arguments are
 refused, and each write is sent to Datto exactly once: a 429, an IP block, a 5xx or a 401
@@ -170,6 +170,7 @@ is never retried. A rate limit returns
 | `datto_site_hardware` | Manufacturer, model and serial number of the devices in one site (reads each device audit, paced for the rate limit; up to 100 devices or 20 s per call by default, see `DATTO_SITE_HARDWARE_*`; continue with `nextOffset`) | Yes |
 | `datto_get_site_patches` | Get Windows patch installation status across all devices in a site | Yes |
 | `datto_set_device_udf` | Set user-defined fields (udf1-udf300) on a device (write). Checks the device first, refuses UDFs listed in `DATTO_HIDDEN_UDFS`, and reports which UDFs were set or cleared without echoing the values | No |
+| `datto_move_device` | Move a device to another site (write). Checks the device and the target site first | No |
 
 ## Docker
 

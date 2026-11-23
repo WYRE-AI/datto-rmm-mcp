@@ -769,6 +769,27 @@ export function createMcpServer(
           },
         },
         {
+          name: "datto_move_device",
+          description:
+            "WRITE: move a device to another site. The device then takes that site's policies, settings and variables. The device and the target site are checked first; moving a device to the site it is already in is refused. Sent once, never retried; a rate limit returns error_type rate_limited with retry_after_seconds.",
+          annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+          inputSchema: {
+            type: "object",
+            properties: {
+              deviceUid: {
+                type: "string",
+                description: "The device UID to move",
+              },
+              siteUid: {
+                type: "string",
+                description: "The UID of the site to move it to",
+              },
+            },
+            required: ["deviceUid", "siteUid"],
+            additionalProperties: false,
+          },
+        },
+        {
           name: "datto_get_job",
           description:
             "Get status and details for a quick job by its UID (e.g. queued/running/completed, device count, timestamps). Use this after datto_run_quickjob to check whether the job finished and how it went.",
@@ -1353,6 +1374,50 @@ export function createMcpServer(
           return {
             content: [
               { type: "text", text: JSON.stringify(result ?? {}, null, 2) },
+            ],
+          };
+        }
+
+        case "datto_move_device": {
+          const input = onlyKeys(args, ["deviceUid", "siteUid"]);
+          const deviceUid = requireUid(input.deviceUid, "deviceUid");
+          const siteUid = requireUid(input.siteUid, "siteUid");
+          const device = await getDeviceForWrite(client, deviceUid);
+          if (device.siteUid === siteUid) {
+            throw new WriteValidationError(
+              `Device ${deviceUid} is already in site ${siteUid}. Nothing was changed.`
+            );
+          }
+          let site: { uid?: string; name?: string };
+          try {
+            site = (await client.sites.get(siteUid)) as { uid?: string; name?: string };
+          } catch (error) {
+            if (isNotFound(error)) {
+              throw new WriteValidationError(`No site with UID ${siteUid}. Nothing was changed.`);
+            }
+            throw error;
+          }
+          await dattoApiWrite(
+            creds,
+            "PUT",
+            `/v2/device/${encodeURIComponent(deviceUid)}/site/${encodeURIComponent(siteUid)}`
+          );
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify(
+                  {
+                    deviceUid,
+                    fromSiteUid: device.siteUid,
+                    fromSiteName: device.siteName,
+                    toSiteUid: siteUid,
+                    toSiteName: site?.name,
+                  },
+                  null,
+                  2
+                ),
+              },
             ],
           };
         }
