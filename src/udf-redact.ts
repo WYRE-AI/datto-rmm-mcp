@@ -4,10 +4,14 @@
  * UDFs are free-form device fields that scripts often use for things that should not be
  * handed to every caller of a read tool: licence keys, recovery or BIOS passwords, and
  * similar. `DATTO_HIDDEN_UDFS` lists the UDF numbers to hide, comma or space separated
- * (example: `3,4,28`). In every device object of a result (`datto_get_device`,
- * `datto_list_devices`), each listed UDF that has a value is replaced with "[hidden]",
- * so the caller can still see that it is set. Empty (null) UDFs stay null. Unset or empty
- * `DATTO_HIDDEN_UDFS` changes nothing.
+ * (example: `3,4,28`). Every tool result that can carry a device's `udf` block
+ * (`datto_list_devices`, `datto_get_device`, `datto_find_device` and
+ * `datto_get_device_audit`) goes through redactUdfs, which replaces each listed UDF that
+ * has a value with "[hidden]", so the caller can still see that it is set. Empty (null)
+ * UDFs stay null. Unset or empty `DATTO_HIDDEN_UDFS` changes nothing.
+ *
+ * This hides values in tool output only. It does not stop a caller from writing a listed
+ * UDF with `datto_set_device_udf`.
  */
 
 export const HIDDEN = "[hidden]";

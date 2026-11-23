@@ -1050,8 +1050,10 @@ export function createMcpServer(
             content: [
               {
                 type: "text",
+                // The matches are a fixed field list with no `udf` today; redact
+                // anyway so a field added later cannot expose a hidden UDF.
                 text: JSON.stringify(
-                  { count: devices.length, devices },
+                  redactUdfs({ count: devices.length, devices }, hiddenUdfKeys()),
                   null,
                   2
                 ),
@@ -1341,7 +1343,8 @@ export function createMcpServer(
 
           return {
             content: [
-              { type: "text", text: JSON.stringify(audit ?? {}, null, 2) },
+              // Redacted in case the audit embeds the device record and its udf block.
+              { type: "text", text: JSON.stringify(redactUdfs(audit ?? {}, hiddenUdfKeys()), null, 2) },
             ],
           };
         }
