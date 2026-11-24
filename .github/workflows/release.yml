@@ -26,10 +26,14 @@ jobs:
       packages: write
       id-token: write
       security-events: write
-    uses: WYRE-AI/reusable-workflows/.github/workflows/mcp-server-release.yml@2b0b056bd7544937e5cbd56cf2e1ff8a180a411f
+    # 697afaad registers QEMU in the reusable Docker job, which the arm64
+    # entry in `platforms:` needs (#115). Same pin as autotask-mcp.
+    uses: WYRE-AI/reusable-workflows/.github/workflows/mcp-server-release.yml@697afaad1424f5db21c48f348f7baad9d0c9942e
     with:
       server-name: datto-rmm-mcp
       image-name: ghcr.io/wyre-ai/datto-rmm-mcp
+      # Multi-arch image so the server also runs on ARM hosts (#115).
+      platforms: linux/amd64,linux/arm64
     secrets: inherit
 
   # DEPLOY TEMPORARILY DISABLED (2026-08 org migration fleet wave).
