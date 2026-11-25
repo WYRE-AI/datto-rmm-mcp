@@ -32,12 +32,21 @@ export class DattoRateLimitedError extends Error {
   }
 }
 
-/** Datto blocked this IP after rate-limit violations (HTTP 403), seen on a direct (non-SDK) call. */
+/**
+ * Datto blocked this IP after rate-limit violations (HTTP 403), seen on a
+ * direct (non-SDK) call. `presumed` is true for a bare 403 taken to be the
+ * block only because it arrived during the cooldown: it is still reported as
+ * a rate limit, but it never renews the cooldown.
+ */
 export class DattoIpBlockedError extends Error {
   readonly statusCode = 403;
   readonly cooldownMs: number;
 
-  constructor(path: string, seconds: number = IP_BLOCK_WAIT_SECONDS) {
+  constructor(
+    path: string,
+    seconds: number = IP_BLOCK_WAIT_SECONDS,
+    readonly presumed: boolean = false
+  ) {
     super(
       "Datto RMM blocked this IP after rate-limit violations (HTTP 403 Forbidden). Not retried. " +
         `Try again in ${seconds} s. Detail: ${path}`
@@ -78,6 +87,7 @@ export function ipBlockSuspected(now: number = Date.now()): boolean {
   return now < ipBlockSuspectedUntil;
 }
 
+
 /** Clears the cooldown state (for tests). */
 export function resetRateLimitState(): void {
   ipBlockSuspectedUntil = 0;
@@ -108,12 +118,17 @@ interface ErrorShape {
   statusCode?: unknown;
   name?: unknown;
   cooldownMs?: unknown;
+  presumed?: unknown;
   message?: unknown;
   response?: unknown;
 }
 
-/** A 429, a named IP block, or a 403 whose text says it is the IP block. */
+/**
+ * A 429, a named IP block, or a 403 whose text says it is the IP block. A
+ * block presumed only from the cooldown is not confirmed, so it cannot renew it.
+ */
 function isConfirmedRateLimit(e: ErrorShape): boolean {
+  if (e.presumed === true) return false;
   if (e.statusCode === 429 || e.name === "DattoRmmIpBlockedError") return true;
   if (e.statusCode !== 403) return false;
   // The SDK only spots an IP block in a JSON body; a plain-text one arrives
@@ -131,6 +146,7 @@ function isConfirmedRateLimit(e: ErrorShape): boolean {
 export function isRateLimitError(error: unknown): boolean {
   if (typeof error !== "object" || error === null) return false;
   const e = error as ErrorShape;
+  if (e.name === "DattoRmmIpBlockedError") return true;
   return isConfirmedRateLimit(e) || (e.statusCode === 403 && ipBlockSuspected());
 }
 

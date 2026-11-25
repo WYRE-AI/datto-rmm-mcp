@@ -284,6 +284,22 @@ describe("IP-block 403 on a direct call", () => {
     expect(result?.structuredContent).toEqual({ error_type: "rate_limited", retry_after_seconds: 300 });
   });
 
+  it("does not restart the cooldown for a bare 403 that is only presumed to be the block", async () => {
+    // A 429 50 s ago with a 60 s cooldown leaves 10 s.
+    noteRateLimited(60, Date.now() - 50_000);
+    stubFetch((url) => (url.startsWith(PATCHES) ? forbidden("Forbidden") : undefined));
+    const result = await toolResult("datto_get_device_patches", { deviceUid: DEVICE });
+    expect(result?.structuredContent).toEqual({ error_type: "rate_limited", retry_after_seconds: 300 });
+    expect(ipBlockSuspected(Date.now() + 11_000)).toBe(false);
+  });
+
+  it("does restart the cooldown for a 403 whose body confirms the block", async () => {
+    noteRateLimited(60, Date.now() - 50_000);
+    stubFetch((url) => (url.startsWith(PATCHES) ? forbidden("IP blocked due to rate limit violations") : undefined));
+    await toolResult("datto_get_device_patches", { deviceUid: DEVICE });
+    expect(ipBlockSuspected(Date.now() + 11_000)).toBe(true);
+  });
+
   it("leaves a permissions 403 alone when no rate limit has been seen", async () => {
     stubFetch((url) => (url.startsWith(PATCHES) ? forbidden("Forbidden") : undefined));
     const result = await toolResult("datto_get_device_patches", { deviceUid: DEVICE });

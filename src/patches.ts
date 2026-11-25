@@ -27,6 +27,7 @@ import type { DattoCredentials } from "./mcp-server.js";
 import {
   DattoIpBlockedError,
   DattoRateLimitedError,
+  IP_BLOCK_WAIT_SECONDS,
   RATE_LIMIT_WAIT_SECONDS,
   ipBlockSuspected,
   looksLikeIpBlock,
@@ -74,8 +75,15 @@ async function throwIfRateLimited(response: Response, path: string): Promise<voi
   if (response.status === 403) {
     // Read a copy: the caller may still need the body for its own error.
     const confirmed = looksLikeIpBlock(await response.clone().text());
-    if (confirmed) noteRateLimited();
-    if (confirmed || ipBlockSuspected()) throw new DattoIpBlockedError(path);
+    if (confirmed) {
+      noteRateLimited();
+      throw new DattoIpBlockedError(path);
+    }
+    // A bare 403 during the cooldown is presumed to be the block. It reports
+    // the usual wait but does not restart the cooldown (only a 429 or a
+    // confirmed block does), so a permissions error cannot keep itself
+    // looking like a rate limit.
+    if (ipBlockSuspected()) throw new DattoIpBlockedError(path, IP_BLOCK_WAIT_SECONDS, true);
   }
 }
 
