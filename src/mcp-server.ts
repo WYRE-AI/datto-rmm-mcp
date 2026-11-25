@@ -154,10 +154,13 @@ function warnSiteHardwareConfig(warnings: string[]): void {
 
 async function collectItems<T>(
   iterable: AsyncIterable<T>,
-  max: number
+  max: number,
+  signal?: AbortSignal
 ): Promise<T[]> {
   const items: T[] = [];
   for await (const item of iterable) {
+    // Leaving the loop closes the iterator, so no further pages are requested.
+    if (signal?.aborted) break;
     items.push(item);
     if (items.length >= max) break;
   }
@@ -1374,7 +1377,7 @@ export function createMcpServer(
             siteUid,
             {
               // One more than the limit, so a site larger than the limit is reported as truncated.
-              listDevices: () => collectItems(client.sites.devicesAll(siteUid), SITE_DEVICE_LIST_LIMIT + 1),
+              listDevices: (signal) => collectItems(client.sites.devicesAll(siteUid), SITE_DEVICE_LIST_LIMIT + 1, signal),
               audit: (deviceUid) => client.audit.device(deviceUid),
             },
             { offset, max, budgetMs: config.budgetMs, pageSize: config.pageSize }

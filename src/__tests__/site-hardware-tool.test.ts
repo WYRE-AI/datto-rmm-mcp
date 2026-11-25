@@ -5,6 +5,8 @@
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
 import worker from "../worker.js";
+import { sharedAuditPacer } from "../site-hardware.js";
+import { resetRateLimitState } from "../rate-limit.js";
 
 const DATTO_HOST = "https://concord-api.centrastage.net";
 const ENV = { DATTO_API_KEY: "test-key", DATTO_API_SECRET: "test-secret" };
@@ -12,6 +14,9 @@ const SITE = "00000000-0000-4000-8000-0000000000a1";
 const realFetch = globalThis.fetch;
 
 afterEach(() => {
+  // The pacer and rate-limit cooldown are process-wide; a test that hits a 429 must not stop the next one.
+  sharedAuditPacer.reset();
+  resetRateLimitState();
   globalThis.fetch = realFetch;
   vi.unstubAllEnvs();
 });
@@ -139,6 +144,35 @@ function hardwareResult(body: Awaited<ReturnType<typeof rpc>>) {
     notes?: string[];
   };
 }
+
+describe("datto_site_hardware listing deadline", () => {
+  it("stops paging through the site's devices once the time budget has passed", async () => {
+    vi.stubEnv("DATTO_SITE_HARDWARE_BUDGET_MS", "1000");
+    const pages: string[] = [];
+    globalThis.fetch = vi.fn(async (input) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.startsWith(`${DATTO_HOST}/auth/oauth/token`)) {
+        return json({ access_token: "fake-token", token_type: "bearer", expires_in: 3600 });
+      }
+      if (url.startsWith(`${DATTO_HOST}/api/v2/site/${SITE}/devices`)) {
+        pages.push(url);
+        // The first page arrives after the budget has run out.
+        await new Promise((r) => setTimeout(r, 1200));
+        return json({
+          pageDetails: { count: 2, nextPageUrl: `${DATTO_HOST}/api/v2/site/${SITE}/devices?page=2` },
+          devices: [{ uid: "dev-a", hostname: "A" }, { uid: "dev-b", hostname: "B" }],
+        });
+      }
+      throw new Error(`Unstubbed fetch in test: GET ${url}`);
+    }) as typeof fetch;
+
+    const body = await rpc("tools/call", { name: "datto_site_hardware", arguments: { siteUid: SITE } });
+    expect(body.result?.isError).toBe(true);
+    expect(body.result?.content?.[0]?.text).toMatch(/took longer than the 1 s time budget/);
+    await new Promise((r) => setTimeout(r, 400));
+    expect(pages).toHaveLength(1);
+  });
+});
 
 describe("datto_site_hardware configuration", () => {
   it("DATTO_SITE_HARDWARE_PAGE_SIZE caps the devices per call and shows in the tool listing", async () => {

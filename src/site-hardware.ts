@@ -47,6 +47,7 @@ export const MAX_PAGE_SIZE = 250;
  */
 export class AuditPacer {
   private nextSlot = 0;
+  private backoffUntil = 0;
 
   /** Milliseconds a caller asking at `at` would wait for its slot (without taking it). */
   waitFor(at: number): number {
@@ -60,8 +61,19 @@ export class AuditPacer {
     return wait;
   }
 
+  /** Records a rate limit seen by any caller: no audit may be sent before `until`. */
+  backOff(until: number): void {
+    this.backoffUntil = Math.max(this.backoffUntil, until);
+  }
+
+  /** Whole seconds left in a recorded backoff (at least 1), or 0 when none is running. */
+  backoffSeconds(at: number): number {
+    return at < this.backoffUntil ? Math.max(1, Math.ceil((this.backoffUntil - at) / 1000)) : 0;
+  }
+
   reset(): void {
     this.nextSlot = 0;
+    this.backoffUntil = 0;
   }
 }
 
@@ -70,9 +82,13 @@ export const sharedAuditPacer = new AuditPacer();
 
 const TIMED_OUT = Symbol("timed out");
 
-/** Resolves to the promise's value, or TIMED_OUT if `ms` passes first (the promise is left to settle). */
-async function withDeadline<T>(promise: Promise<T>, ms: number): Promise<T | typeof TIMED_OUT> {
+/**
+ * Resolves to the promise's value, or TIMED_OUT if `ms` passes first. On a timeout
+ * `onTimeout` runs (to cancel the work) and the promise is left to settle.
+ */
+async function withDeadline<T>(promise: Promise<T>, ms: number, onTimeout?: () => void): Promise<T | typeof TIMED_OUT> {
   if (ms <= 0) {
+    onTimeout?.();
     promise.catch(() => {});
     return TIMED_OUT;
   }
@@ -82,7 +98,10 @@ async function withDeadline<T>(promise: Promise<T>, ms: number): Promise<T | typ
   });
   try {
     const winner = await Promise.race([promise, deadline]);
-    if (winner === TIMED_OUT) promise.catch(() => {});
+    if (winner === TIMED_OUT) {
+      onTimeout?.();
+      promise.catch(() => {});
+    }
     return winner;
   } finally {
     clearTimeout(timer);
@@ -163,7 +182,7 @@ export interface SiteHardwareResult {
 
 export interface SiteHardwareDeps {
   /** Every device in the site (list entries as Datto returns them). */
-  listDevices: () => Promise<unknown[]>;
+  listDevices: (signal: AbortSignal) => Promise<unknown[]>;
   /** One device's full audit. */
   audit: (deviceUid: string) => Promise<unknown>;
   sleep?: (ms: number) => Promise<void>;
@@ -214,7 +233,9 @@ export async function siteHardware(
   const remaining = () => budgetMs - (now() - started);
 
   const listLimit = opts.listLimit ?? SITE_DEVICE_LIST_LIMIT;
-  const listedOrTimeout = await withDeadline(deps.listDevices(), remaining());
+  // Aborted at the deadline, so a slow multi-page listing stops requesting pages.
+  const listing = new AbortController();
+  const listedOrTimeout = await withDeadline(deps.listDevices(listing.signal), remaining(), () => listing.abort());
   if (listedOrTimeout === TIMED_OUT) {
     throw new Error(
       `Listing the devices in site ${siteUid} took longer than the ${Math.ceil(budgetMs / 1000)} s time budget, so no audits were read. Try again.`
@@ -254,6 +275,20 @@ export async function siteHardware(
     }
     const wait = pacer.reserve(at, gapMs);
     if (wait > 0) await sleep(wait);
+    // Another call may have been rate-limited while this one waited for its slot (or
+    // before it started): send nothing more until that backoff ends.
+    const backoff = pacer.backoffSeconds(now());
+    if (backoff > 0) {
+      stoppedAt = offset + i;
+      rateLimited = {
+        message:
+          "Datto RMM rate-limited another datto_site_hardware call (HTTP 429), so no more audits were sent. " +
+          `Try again in ${backoff} s.`,
+        retryAfterSeconds: backoff,
+      };
+      notes.push(`Stopped: Datto RMM rate-limited the requests (HTTP 429). Try again in ${backoff} s, continuing with offset ${stoppedAt}.`);
+      break;
+    }
     const base = { deviceUid: d.uid, hostname: d.hostname, deviceType: d.deviceType, online: d.online };
     try {
       const audit = await withDeadline(deps.audit(d.uid), remaining());
@@ -276,6 +311,8 @@ export async function siteHardware(
         // Never retried: continuing after a 429 gets the source IP blocked.
         const { message, retryAfterSeconds } = rateLimitDetails(error);
         rateLimited = { message, retryAfterSeconds };
+        // Concurrent calls sharing the pacer stop too, instead of sending queued audits.
+        pacer.backOff(now() + (retryAfterSeconds ?? 60) * 1000);
         stoppedAt = offset + i;
         notes.push(
           `Stopped: Datto RMM rate-limited the requests (HTTP 429). Try again in ${retryAfterSeconds ?? 60} s, ` +

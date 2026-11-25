@@ -87,6 +87,51 @@ describe("siteHardware ordering, shared pacing and deadline", () => {
     expect(r.notes?.join(" ")).toMatch(/waiting for an audit/);
   });
 
+  it("stops a concurrent call's queued audits when another call gets a 429", async () => {
+    let t = 0;
+    let calls = 0;
+    const pacer = new AuditPacer();
+    const deps = {
+      listDevices: async () => devices(4),
+      audit: async (u: string) => {
+        if (++calls === 2) throw new DattoRateLimitedError("/v2/audit/device", 20);
+        return audit(u);
+      },
+      now: () => t,
+      sleep: async (ms: number) => {
+        const target = t + ms;
+        await new Promise((r) => setTimeout(r, 0)); // a real wait: other calls finish handling their responses
+        t = Math.max(t, target);
+      },
+      pacer,
+    };
+    const [a, b] = await Promise.all([siteHardware("s1", deps, { gapMs: 300 }), siteHardware("s2", deps, { gapMs: 300 })]);
+    expect(calls).toBe(2); // nothing is sent after the 429
+    expect(a.rateLimited?.retryAfterSeconds).toBeGreaterThan(0);
+    expect(b.rateLimited?.retryAfterSeconds).toBeGreaterThan(0);
+    // A new call during the backoff sends nothing either.
+    const later = await siteHardware("s3", deps, { gapMs: 300 });
+    expect(calls).toBe(2);
+    expect(later.returned).toBe(0);
+    expect(later.rateLimited?.message).toMatch(/Try again in [0-9]+ s/);
+  });
+
+  it("aborts the device listing when it outlasts the budget, so no more pages are requested", async () => {
+    let signal: AbortSignal | undefined;
+    await expect(
+      siteHardware(
+        "s",
+        {
+          listDevices: (s) => ((signal = s), new Promise(() => {})),
+          audit: async (u) => audit(u),
+          pacer: new AuditPacer(),
+        },
+        { budgetMs: 50 }
+      )
+    ).rejects.toThrow(/took longer/);
+    expect(signal?.aborted).toBe(true);
+  });
+
   it("does not start any audit when listing the devices outlasts the budget", async () => {
     let calls = 0;
     await expect(
