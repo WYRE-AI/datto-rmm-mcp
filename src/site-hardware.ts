@@ -8,16 +8,19 @@
  * Datto's API rate limit (600 reads a minute per account, shared by everything using the
  * account) and inside a caller's time limit:
  *
- * - one audit at a time, `gapMs` apart (default 300 ms, about 200 a minute);
+ * - one audit at a time, `gapMs` apart (default 300 ms, about 200 a minute). The pacing is
+ *   shared by every call in this process, so concurrent calls together stay at that rate;
  * - it stops after `budgetMs` and returns what it has with `nextOffset`, so the caller can
- *   continue from there. The default (20 s) suits MCP clients and gateways that time out a
+ *   continue from there. The budget also bounds a request that is still pending: a slow
+ *   audit is abandoned at the deadline and that device is the one to continue from. The default (20 s) suits MCP clients and gateways that time out a
  *   tool call well under a minute; set DATTO_SITE_HARDWARE_BUDGET_MS to change it;
  * - at most `pageSize` devices are read per call (default 100, DATTO_SITE_HARDWARE_PAGE_SIZE);
  * - a rate-limit error stops it at once (never retried: Datto blocks the source IP when
  *   requests continue after a 429) and is reported with how long to wait;
  * - any other error on one device is reported on that device and the rest carry on.
  *
- * Devices are sorted by hostname, so `offset` / `nextOffset` page through a stable order.
+ * Devices are sorted by hostname, then device UID, so `offset` / `nextOffset` page through a
+ * stable order even when hostnames repeat.
  */
 
 import { rateLimitDetails, isRateLimitError } from "./rate-limit.js";
@@ -37,6 +40,54 @@ export const MAX_BUDGET_MS = 300_000;
 export const DEFAULT_PAGE_SIZE = 100;
 /** Datto RMM's API returns at most 250 items per page, so the page size is clamped to it. */
 export const MAX_PAGE_SIZE = 250;
+
+/**
+ * Spaces audits `gapMs` apart across every caller that shares it. Datto's limit is per
+ * account and its IP block is per source IP, so one pacer serves the whole process.
+ */
+export class AuditPacer {
+  private nextSlot = 0;
+
+  /** Milliseconds a caller asking at `at` would wait for its slot (without taking it). */
+  waitFor(at: number): number {
+    return Math.max(0, this.nextSlot - at);
+  }
+
+  /** Takes the slot at `at + waitFor(at)` and returns the wait. */
+  reserve(at: number, gapMs: number): number {
+    const wait = this.waitFor(at);
+    this.nextSlot = at + wait + gapMs;
+    return wait;
+  }
+
+  reset(): void {
+    this.nextSlot = 0;
+  }
+}
+
+/** The process-wide pacer used when a call does not pass its own. */
+export const sharedAuditPacer = new AuditPacer();
+
+const TIMED_OUT = Symbol("timed out");
+
+/** Resolves to the promise's value, or TIMED_OUT if `ms` passes first (the promise is left to settle). */
+async function withDeadline<T>(promise: Promise<T>, ms: number): Promise<T | typeof TIMED_OUT> {
+  if (ms <= 0) {
+    promise.catch(() => {});
+    return TIMED_OUT;
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<typeof TIMED_OUT>((resolve) => {
+    timer = setTimeout(() => resolve(TIMED_OUT), ms);
+  });
+  try {
+    const winner = await Promise.race([promise, deadline]);
+    if (winner === TIMED_OUT) promise.catch(() => {});
+    return winner;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 export interface SiteHardwareConfig {
   budgetMs: number;
@@ -117,6 +168,8 @@ export interface SiteHardwareDeps {
   audit: (deviceUid: string) => Promise<unknown>;
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
+  /** Shared audit pacing (default: sharedAuditPacer, one per process). */
+  pacer?: AuditPacer;
 }
 
 export interface SiteHardwareOptions {
@@ -156,10 +209,18 @@ export async function siteHardware(
   const max = clampInt(opts.max, Math.min(DEFAULT_MAX_DEVICES, pageSize), 1, pageSize);
   const gapMs = opts.gapMs ?? DEFAULT_GAP_MS;
   const budgetMs = opts.budgetMs ?? DEFAULT_BUDGET_MS;
+  const pacer = deps.pacer ?? sharedAuditPacer;
   const started = now();
+  const remaining = () => budgetMs - (now() - started);
 
   const listLimit = opts.listLimit ?? SITE_DEVICE_LIST_LIMIT;
-  const listedRaw = await deps.listDevices();
+  const listedOrTimeout = await withDeadline(deps.listDevices(), remaining());
+  if (listedOrTimeout === TIMED_OUT) {
+    throw new Error(
+      `Listing the devices in site ${siteUid} took longer than the ${Math.ceil(budgetMs / 1000)} s time budget, so no audits were read. Try again.`
+    );
+  }
+  const listedRaw = listedOrTimeout;
   const listTruncated = listedRaw.length > listLimit;
   const listed = listTruncated ? listedRaw.slice(0, listLimit) : listedRaw;
   const all = listed
@@ -170,7 +231,11 @@ export async function siteHardware(
       online: typeof field(d, "online") === "boolean" ? (field(d, "online") as boolean) : undefined,
     }))
     .filter((d): d is { uid: string; hostname: string; deviceType: string | undefined; online: boolean | undefined } => d.uid !== null)
-    .sort((a, b) => a.hostname.toLowerCase().localeCompare(b.hostname.toLowerCase()));
+    .sort(
+      (a, b) =>
+        a.hostname.toLowerCase().localeCompare(b.hostname.toLowerCase()) ||
+        (a.uid < b.uid ? -1 : a.uid > b.uid ? 1 : 0)
+    );
 
   const slice = all.slice(offset, offset + max);
   const rows: HardwareRow[] = [];
@@ -180,17 +245,25 @@ export async function siteHardware(
 
   for (let i = 0; i < slice.length; i++) {
     const d = slice[i];
-    if (i > 0) {
-      if (now() - started + gapMs >= budgetMs) {
-        stoppedAt = offset + i;
-        notes.push(`Stopped at the time limit after ${rows.length} devices; continue with offset ${stoppedAt}.`);
-        break;
-      }
-      await sleep(gapMs);
+    // Checked and taken with no await in between, so concurrent calls cannot share a slot.
+    const at = now();
+    if (at - started + pacer.waitFor(at) >= budgetMs) {
+      stoppedAt = offset + i;
+      notes.push(`Stopped at the time limit after ${rows.length} devices; continue with offset ${stoppedAt}.`);
+      break;
     }
+    const wait = pacer.reserve(at, gapMs);
+    if (wait > 0) await sleep(wait);
     const base = { deviceUid: d.uid, hostname: d.hostname, deviceType: d.deviceType, online: d.online };
     try {
-      const audit = await deps.audit(d.uid);
+      const audit = await withDeadline(deps.audit(d.uid), remaining());
+      if (audit === TIMED_OUT) {
+        stoppedAt = offset + i;
+        notes.push(
+          `Stopped at the time limit while waiting for an audit, after ${rows.length} devices; continue with offset ${stoppedAt}.`
+        );
+        break;
+      }
       const sys = field(audit, "systemInfo");
       rows.push({
         ...base,

@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  AuditPacer,
   siteHardware,
   siteHardwareConfig,
   DEFAULT_BUDGET_MS,
@@ -30,12 +31,74 @@ function audit(uid: string) {
 function clock() {
   let t = 0;
   return {
+    pacer: new AuditPacer(),
     now: () => t,
     sleep: async (ms: number) => {
       t += ms;
     },
   };
 }
+
+describe("siteHardware ordering, shared pacing and deadline", () => {
+  it("breaks hostname ties by device UID, whatever order the list arrives in", async () => {
+    const a = { uid: "uid-a", hostname: "PC" };
+    const b = { uid: "uid-b", hostname: "pc" };
+    const page = async (list: unknown[], offset: number) =>
+      (await siteHardware("s", { listDevices: async () => list, audit: async (u) => audit(u), ...clock() }, { offset, max: 1 }))
+        .devices[0].deviceUid;
+    expect([await page([a, b], 0), await page([b, a], 1)]).toEqual(["uid-a", "uid-b"]);
+    expect([await page([b, a], 0), await page([a, b], 1)]).toEqual(["uid-a", "uid-b"]);
+  });
+
+  it("spaces audits across concurrent calls that share a pacer", async () => {
+    let t = 0;
+    const starts: number[] = [];
+    const pacer = new AuditPacer();
+    const deps = {
+      listDevices: async () => devices(4),
+      audit: async (u: string) => (starts.push(t), audit(u)),
+      now: () => t,
+      sleep: async (ms: number) => {
+        const target = t + ms;
+        await Promise.resolve();
+        t = Math.max(t, target);
+      },
+      pacer,
+    };
+    await Promise.all([siteHardware("s1", deps, { gapMs: 300 }), siteHardware("s2", deps, { gapMs: 300 })]);
+    expect(starts).toHaveLength(8);
+    const sorted = [...starts].sort((x, y) => x - y);
+    for (let i = 1; i < sorted.length; i++) expect(sorted[i] - sorted[i - 1]).toBeGreaterThanOrEqual(300);
+  });
+
+  it("returns the rows read so far when an audit is still pending at the deadline", async () => {
+    let calls = 0;
+    const r = await siteHardware(
+      "s",
+      {
+        listDevices: async () => devices(3),
+        audit: (u) => (calls++ === 0 ? Promise.resolve(audit(u)) : new Promise(() => {})),
+        pacer: new AuditPacer(),
+      },
+      { gapMs: 0, budgetMs: 50 }
+    );
+    expect(r.returned).toBe(1);
+    expect(r.nextOffset).toBe(1);
+    expect(r.notes?.join(" ")).toMatch(/waiting for an audit/);
+  });
+
+  it("does not start any audit when listing the devices outlasts the budget", async () => {
+    let calls = 0;
+    await expect(
+      siteHardware(
+        "s",
+        { listDevices: () => new Promise(() => {}), audit: async (u) => (calls++, audit(u)), pacer: new AuditPacer() },
+        { budgetMs: 50 }
+      )
+    ).rejects.toThrow(/took longer than the 1 s time budget/);
+    expect(calls).toBe(0);
+  });
+});
 
 describe("siteHardware", () => {
   it("returns manufacturer, model and serial, sorted by hostname", async () => {
