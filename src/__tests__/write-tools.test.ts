@@ -17,7 +17,7 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import worker from "../worker.js";
 import { validateQuickJobVariables } from "../writes.js";
-import { resetRateLimitState } from "../rate-limit.js";
+import { ipBlockSuspected, noteRateLimited, resetRateLimitState } from "../rate-limit.js";
 
 const DATTO_HOST = "https://concord-api.centrastage.net";
 const ENV = { DATTO_API_KEY: "write-test-key", DATTO_API_SECRET: "write-test-secret" };
@@ -142,14 +142,14 @@ describe("write tool annotations", () => {
     }
   });
 
-  it("marks quick jobs and UDF writes destructive, and alert resolution not", async () => {
+  it("marks quick jobs, UDF writes and alert resolution destructive", async () => {
     const body = await rpc("tools/list", {});
     const tools = (body.result as { tools: { name: string; annotations?: Record<string, boolean> }[] })
       .tools;
     const hint = (n: string) => tools.find((t) => t.name === n)?.annotations?.destructiveHint;
     expect(hint("datto_run_quickjob")).toBe(true);
     expect(hint("datto_set_device_udf")).toBe(true);
-    expect(hint("datto_resolve_alert")).toBe(false);
+    expect(hint("datto_resolve_alert")).toBe(true);
   });
 });
 
@@ -319,6 +319,30 @@ describe("writes are sent once and never retried", () => {
     // Nothing is re-sent later either (the SDK waits 1 s before its retry).
     await new Promise((resolve) => setTimeout(resolve, 1100));
     expect(calls.writes).toHaveLength(1);
+  });
+
+  it("a bare 403 presumed to be the IP block does not restart the cooldown", async () => {
+    // A 429 50 s ago with a 60 s cooldown leaves 10 s.
+    noteRateLimited(60, Date.now() - 50_000);
+    stubDatto(() => json({ message: "Forbidden" }, 403));
+    const result = await call("datto_resolve_alert", { alertUid: "alert-1" });
+    expect(result.structuredContent).toEqual({ error_type: "rate_limited", retry_after_seconds: 300 });
+    expect(ipBlockSuspected(Date.now() + 11_000)).toBe(false);
+  });
+
+  it.each([307, 308])("a %i on a quick job is not followed, so the body is sent once", async (status) => {
+    const calls = stubDatto(
+      () => new Response(null, { status, headers: { Location: `${DATTO_HOST}/api/v2/device/device-1/quickjob-elsewhere` } })
+    );
+    const result = await call("datto_run_quickjob", { deviceUid: "device-1", jobName: "x", componentUid: "comp-novars" });
+    expect(calls.writes).toHaveLength(1);
+    expect(result.isError).toBe(true);
+    expect(text(result)).toMatch(new RegExp(`HTTP ${status}.*Not retried`));
+    const writeInit = vi
+      .mocked(globalThis.fetch)
+      .mock.calls.map(([, init]) => init)
+      .find((init) => init?.method === "PUT");
+    expect(writeInit?.redirect).toBe("manual");
   });
 
   it("a 401 on a write is not re-sent", async () => {

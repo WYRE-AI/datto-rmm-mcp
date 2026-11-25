@@ -43,6 +43,7 @@ import {
   WriteValidationError,
   dattoApiWrite,
   onlyKeys,
+  MAX_JOB_NAME_LENGTH,
   requireJobName,
   requireUid,
   validateQuickJobVariables,
@@ -499,7 +500,12 @@ function sanitizeCallerUpn(raw: string | undefined): string | undefined {
  * that text is part of the name the caller chose, not a competing claim about
  * who ran the job.
  *
- * @param jobName - Name as supplied by the caller.
+ * The result never exceeds MAX_JOB_NAME_LENGTH: when the caller's name plus
+ * the suffix would, the caller's part is shortened so the attribution is kept
+ * whole. (A UPN is capped at MAX_CALLER_UPN_LENGTH, so at least
+ * MAX_JOB_NAME_LENGTH - MAX_CALLER_UPN_LENGTH - 3 characters of the name remain.)
+ *
+ * @param jobName - Name as supplied by the caller (already within the limit).
  * @param callerUpn - Sanitized caller identity, if the gateway supplied one.
  * @returns The job name, attributed when a caller is known.
  */
@@ -509,7 +515,10 @@ function attributeJobName(jobName: string, callerUpn?: string): string {
   // Idempotent: a retry, or a caller that already attributed the name, must
   // not accumulate duplicate suffixes.
   if (jobName.endsWith(`[${upn}]`)) return jobName;
-  return `${jobName} [${upn}]`;
+  const suffix = ` [${upn}]`;
+  const room = MAX_JOB_NAME_LENGTH - suffix.length;
+  const name = jobName.length > room ? jobName.slice(0, room).trimEnd() : jobName;
+  return `${name}${suffix}`;
 }
 
 /**
@@ -659,7 +668,8 @@ export function createMcpServer(
           name: "datto_resolve_alert",
           description:
             "WRITE: resolve an open alert by its UID. Cannot be undone from the API. Sent once, never retried; a rate limit returns error_type rate_limited with retry_after_seconds.",
-          annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+          // Destructive in MCP's sense: it changes an existing alert's state (not additive) and cannot be undone.
+          annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
           _meta: ALERT_CARD_META,
           inputSchema: {
             type: "object",

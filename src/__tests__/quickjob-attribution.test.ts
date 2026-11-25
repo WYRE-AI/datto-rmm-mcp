@@ -204,6 +204,19 @@ describe("quick job attribution", () => {
     expect(suffix.length).toBeLessThanOrEqual(64);
   });
 
+  it("keeps an attributed name within the 100-character limit, shortening the caller's part", async () => {
+    const capture: { body?: unknown } = {};
+    stubQuickJob(capture);
+    const upn = `${"u".repeat(40)}@example.com`;
+
+    await runQuickJob(ENV_GATEWAY, { ...GATEWAY_HEADERS, "X-Mcp-User-Upn": upn }, "J".repeat(100));
+
+    const name = (capture.body as { jobName: string }).jobName;
+    expect(name.length).toBeLessThanOrEqual(100);
+    expect(name.endsWith(` [${upn}]`)).toBe(true);
+    expect(name.startsWith("J".repeat(100 - upn.length - 3))).toBe(true);
+  });
+
   it("keeps a caller's own bracketed text and adds attribution after it", async () => {
     // "Job [ticket-12]" is the name the caller chose; the trailing suffix is
     // always the gateway's attribution. Documented behaviour, not an accident.

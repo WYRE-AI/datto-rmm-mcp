@@ -29,6 +29,7 @@ import { PLATFORM_URLS, forgetAccessToken, getAccessToken } from "./patches.js";
 import {
   DattoIpBlockedError,
   DattoRateLimitedError,
+  IP_BLOCK_WAIT_SECONDS,
   RATE_LIMIT_WAIT_SECONDS,
   ipBlockSuspected,
   looksLikeIpBlock,
@@ -79,6 +80,10 @@ export async function dattoApiWrite(
       "Content-Type": "application/json",
     },
     body: body === undefined ? undefined : JSON.stringify(body),
+    // Never follow a redirect: a 307/308 would make fetch send the method and
+    // body again, which for a quick job could start it twice. A 3xx is
+    // reported as a failed write instead.
+    redirect: "manual",
   });
 
   if (response.status === 429) {
@@ -93,9 +98,13 @@ export async function dattoApiWrite(
   const text = await response.text();
 
   if (response.status === 403) {
-    const confirmed = looksLikeIpBlock(text);
-    if (confirmed) noteRateLimited();
-    if (confirmed || ipBlockSuspected()) throw new DattoIpBlockedError(path);
+    if (looksLikeIpBlock(text)) {
+      noteRateLimited();
+      throw new DattoIpBlockedError(path);
+    }
+    // Presumed from the cooldown only: reported as the block, but it does not
+    // restart the cooldown (see throwIfRateLimited in patches.ts).
+    if (ipBlockSuspected()) throw new DattoIpBlockedError(path, IP_BLOCK_WAIT_SECONDS, true);
   }
   if (response.status === 401) {
     forgetAccessToken(creds);
