@@ -87,7 +87,10 @@ export async function dattoApiWrite(
   });
 
   if (response.status === 429) {
-    await response.text();
+    // Status and Retry-After are all a 429 needs. Report it at once and discard the
+    // body without waiting: a body that stalls or is cut off must not delay or hide the
+    // rate limit (and the backoff other calls rely on).
+    response.body?.cancel().catch(() => {});
     noteRateLimited();
     throw new DattoRateLimitedError(
       path,

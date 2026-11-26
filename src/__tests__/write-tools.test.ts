@@ -345,6 +345,16 @@ describe("writes are sent once and never retried", () => {
     expect(writeInit?.redirect).toBe("manual");
   });
 
+  it.each([
+    ["stalls", () => new ReadableStream<Uint8Array>({ start() {} })],
+    ["is cut off", () => new ReadableStream<Uint8Array>({ start(c) { c.error(new TypeError("terminated")); } })],
+  ])("a 429 whose body %s is still reported as rate_limited at once", async (_label, body) => {
+    const calls = stubDatto(() => new Response(body(), { status: 429, headers: { "Retry-After": "20" } }));
+    const result = await call("datto_resolve_alert", { alertUid: "alert-1" });
+    expect(calls.writes).toHaveLength(1);
+    expect(result.structuredContent).toEqual({ error_type: "rate_limited", retry_after_seconds: 20 });
+  }, 2_000);
+
   it("a 401 on a write is not re-sent", async () => {
     const calls = stubDatto(() => json({}, 401));
     const result = await call("datto_resolve_alert", { alertUid: "alert-1" });
