@@ -132,6 +132,93 @@ describe("siteHardware ordering, shared pacing and deadline", () => {
     expect(signal?.aborted).toBe(true);
   });
 
+  it("records a 429 from an audit that answers after the deadline", async () => {
+    const pacer = new AuditPacer();
+    const r = await siteHardware(
+      "s",
+      {
+        listDevices: async () => devices(2),
+        audit: () =>
+          new Promise((_, reject) => setTimeout(() => reject(new DattoRateLimitedError("/v2/audit/device", 20)), 100)),
+        pacer,
+      },
+      { gapMs: 0, budgetMs: 50 }
+    );
+    expect(r.returned).toBe(0);
+    expect(pacer.backoffSeconds(Date.now())).toBe(0); // not yet answered
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(pacer.backoffSeconds(Date.now())).toBeGreaterThan(0);
+  });
+
+  it("does not list the devices while another call's backoff is running", async () => {
+    const pacer = new AuditPacer();
+    pacer.backOff(Date.now() + 20_000);
+    let listed = 0;
+    const r = await siteHardware(
+      "s",
+      { listDevices: async () => (listed++, devices(2)), audit: async (u) => audit(u), pacer },
+      { offset: 3 }
+    );
+    expect(listed).toBe(0);
+    expect(r.returned).toBe(0);
+    expect(r.nextOffset).toBe(3);
+    expect(r.rateLimited?.retryAfterSeconds).toBeGreaterThan(0);
+  });
+
+  it("aborts a listing in progress when another call records a rate limit", async () => {
+    const pacer = new AuditPacer();
+    let signal: AbortSignal | undefined;
+    let audits = 0;
+    setTimeout(() => pacer.backOff(Date.now() + 20_000), 10);
+    const r = await siteHardware(
+      "s",
+      {
+        // Pages keep coming until the signal is aborted; then the partial list is returned.
+        listDevices: (s) =>
+          ((signal = s), new Promise((resolve) => s.addEventListener("abort", () => resolve(devices(1))))),
+        audit: async (u) => (audits++, audit(u)),
+        pacer,
+      },
+      { budgetMs: 5_000 }
+    );
+    expect(signal?.aborted).toBe(true);
+    expect(audits).toBe(0);
+    expect(r.rateLimited?.retryAfterSeconds).toBeGreaterThan(0);
+  });
+
+  it("records a 429 on the device listing, so other calls back off too", async () => {
+    const pacer = new AuditPacer();
+    await expect(
+      siteHardware(
+        "s",
+        { listDevices: async () => Promise.reject(new DattoRateLimitedError("/v2/site/devices", 20)), audit: async (u) => audit(u), pacer },
+        {}
+      )
+    ).rejects.toThrow(/HTTP 429/);
+    expect(pacer.backoffSeconds(Date.now())).toBeGreaterThan(0);
+  });
+
+  it("rechecks the deadline after the pacing wait, so an overrun wait sends nothing", async () => {
+    let t = 0;
+    let calls = 0;
+    const r = await siteHardware(
+      "s",
+      {
+        listDevices: async () => devices(3),
+        audit: async (u) => (calls++, audit(u)),
+        now: () => t,
+        sleep: async (ms: number) => {
+          t += ms + 2_000; // the timer fires late
+        },
+        pacer: new AuditPacer(),
+      },
+      { gapMs: 500, budgetMs: 2_000 }
+    );
+    expect(calls).toBe(1);
+    expect(r.returned).toBe(1);
+    expect(r.nextOffset).toBe(1);
+  });
+
   it("does not start any audit when listing the devices outlasts the budget", async () => {
     let calls = 0;
     await expect(

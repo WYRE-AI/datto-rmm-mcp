@@ -48,6 +48,7 @@ export const MAX_PAGE_SIZE = 250;
 export class AuditPacer {
   private nextSlot = 0;
   private backoffUntil = 0;
+  private readonly listeners = new Set<() => void>();
 
   /** Milliseconds a caller asking at `at` would wait for its slot (without taking it). */
   waitFor(at: number): number {
@@ -61,9 +62,17 @@ export class AuditPacer {
     return wait;
   }
 
-  /** Records a rate limit seen by any caller: no audit may be sent before `until`. */
+  /** Records a rate limit seen by any caller: no request may be sent before `until`. */
   backOff(until: number): void {
-    this.backoffUntil = Math.max(this.backoffUntil, until);
+    if (until <= this.backoffUntil) return;
+    this.backoffUntil = until;
+    for (const listener of [...this.listeners]) listener();
+  }
+
+  /** Calls `listener` whenever a backoff is recorded; returns the unsubscribe function. */
+  onBackOff(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
   }
 
   /** Whole seconds left in a recorded backoff (at least 1), or 0 when none is running. */
@@ -74,6 +83,7 @@ export class AuditPacer {
   reset(): void {
     this.nextSlot = 0;
     this.backoffUntil = 0;
+    this.listeners.clear();
   }
 }
 
@@ -232,15 +242,59 @@ export async function siteHardware(
   const started = now();
   const remaining = () => budgetMs - (now() - started);
 
+  /**
+   * Records a rate limit from a listing or audit request on the shared pacer, even when
+   * it arrives after this call has stopped waiting for that request, so no call sends
+   * more requests during Datto's cooldown. The promise itself is returned unchanged.
+   */
+  const observeRateLimit = <T>(request: Promise<T>): Promise<T> => {
+    request.catch((error: unknown) => {
+      if (!isRateLimitError(error)) return;
+      const { retryAfterSeconds } = rateLimitDetails(error);
+      pacer.backOff(now() + (retryAfterSeconds ?? 60) * 1000);
+    });
+    return request;
+  };
+
+  /** Result for a call that sent nothing because a rate-limit backoff is running. */
+  const backedOffBeforeListing = (seconds: number): SiteHardwareResult => ({
+    siteUid,
+    totalDevices: 0,
+    offset,
+    returned: 0,
+    devices: [],
+    nextOffset: offset,
+    rateLimited: {
+      message:
+        "Datto RMM rate-limited another datto_site_hardware call (HTTP 429), so the site's devices were not listed. " +
+        `Try again in ${seconds} s.`,
+      retryAfterSeconds: seconds,
+    },
+    notes: [`Stopped before listing the devices: Datto RMM rate-limited the requests (HTTP 429). Try again in ${seconds} s, continuing with offset ${offset}.`],
+  });
+
   const listLimit = opts.listLimit ?? SITE_DEVICE_LIST_LIMIT;
-  // Aborted at the deadline, so a slow multi-page listing stops requesting pages.
+  const backoffBefore = pacer.backoffSeconds(now());
+  if (backoffBefore > 0) return backedOffBeforeListing(backoffBefore);
+  // Aborted at the deadline, or when any call records a rate limit, so a multi-page
+  // listing stops requesting pages.
   const listing = new AbortController();
-  const listedOrTimeout = await withDeadline(deps.listDevices(listing.signal), remaining(), () => listing.abort());
+  const stopListening = pacer.onBackOff(() => listing.abort());
+  let listedOrTimeout: unknown[] | typeof TIMED_OUT;
+  try {
+    listedOrTimeout = await withDeadline(observeRateLimit(deps.listDevices(listing.signal)), remaining(), () =>
+      listing.abort()
+    );
+  } finally {
+    stopListening();
+  }
   if (listedOrTimeout === TIMED_OUT) {
     throw new Error(
       `Listing the devices in site ${siteUid} took longer than the ${Math.ceil(budgetMs / 1000)} s time budget, so no audits were read. Try again.`
     );
   }
+  const backoffAfterListing = pacer.backoffSeconds(now());
+  if (backoffAfterListing > 0) return backedOffBeforeListing(backoffAfterListing);
   const listedRaw = listedOrTimeout;
   const listTruncated = listedRaw.length > listLimit;
   const listed = listTruncated ? listedRaw.slice(0, listLimit) : listedRaw;
@@ -275,6 +329,12 @@ export async function siteHardware(
     }
     const wait = pacer.reserve(at, gapMs);
     if (wait > 0) await sleep(wait);
+    // The wait can overrun (a delayed timer): send nothing whose answer cannot be used.
+    if (remaining() <= 0) {
+      stoppedAt = offset + i;
+      notes.push(`Stopped at the time limit after ${rows.length} devices; continue with offset ${stoppedAt}.`);
+      break;
+    }
     // Another call may have been rate-limited while this one waited for its slot (or
     // before it started): send nothing more until that backoff ends.
     const backoff = pacer.backoffSeconds(now());
@@ -291,7 +351,7 @@ export async function siteHardware(
     }
     const base = { deviceUid: d.uid, hostname: d.hostname, deviceType: d.deviceType, online: d.online };
     try {
-      const audit = await withDeadline(deps.audit(d.uid), remaining());
+      const audit = await withDeadline(observeRateLimit(deps.audit(d.uid)), remaining());
       if (audit === TIMED_OUT) {
         stoppedAt = offset + i;
         notes.push(
