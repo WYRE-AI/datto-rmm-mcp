@@ -42,3 +42,41 @@ describe("access-token cache", () => {
     expect(s.tokenRequests()).toBe(2);
   });
 });
+
+describe("429 response bodies", () => {
+  /** A 429 whose body records whether it was cancelled (and never ends on its own). */
+  function tooMany(onCancel: () => void): Response {
+    return new Response(new ReadableStream<Uint8Array>({ start() {}, cancel: onCancel }), {
+      status: 429,
+      headers: { "Retry-After": "20" },
+    });
+  }
+
+  it("cancels the body of a 429 on a direct GET", async () => {
+    let cancelled = false;
+    globalThis.fetch = vi.fn(async (input) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.startsWith(`${DATTO_HOST}/auth/oauth/token`)) {
+        return new Response(JSON.stringify({ access_token: "t", token_type: "bearer", expires_in: 3600 }), { status: 200 });
+      }
+      return tooMany(() => {
+        cancelled = true;
+      });
+    }) as typeof fetch;
+    await expect(dattoApiGet({ apiKey: "body-key-1", apiSecretKey: "s", platform: "concord" }, "/v2/x")).rejects.toThrow(/429/);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(cancelled).toBe(true);
+  });
+
+  it("cancels the body of a 429 on the token exchange", async () => {
+    let cancelled = false;
+    globalThis.fetch = vi.fn(async () =>
+      tooMany(() => {
+        cancelled = true;
+      })
+    ) as typeof fetch;
+    await expect(dattoApiGet({ apiKey: "body-key-2", apiSecretKey: "s", platform: "concord" }, "/v2/x")).rejects.toThrow(/429/);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(cancelled).toBe(true);
+  });
+});

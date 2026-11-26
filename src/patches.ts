@@ -72,6 +72,8 @@ const tokenCache = new Map<string, { accessToken: string; expiresAt: number }>()
 async function throwIfRateLimited(response: Response, path: string): Promise<void> {
   if (response.status === 429) {
     const seconds = retryAfterSeconds(response.headers.get("retry-after")) ?? RATE_LIMIT_WAIT_SECONDS;
+    // The body is never read: cancel it (without waiting) so the connection is released.
+    void response.body?.cancel().catch(() => {});
     noteRateLimited();
     throw new DattoRateLimitedError(path, seconds);
   }
