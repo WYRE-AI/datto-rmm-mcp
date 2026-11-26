@@ -22,6 +22,7 @@
  * per-patch installed/missing/pending signal this module exists to expose.
  */
 
+import { createHash } from "node:crypto";
 import type { Platform } from "@wyre-ai/node-datto-rmm";
 import type { DattoCredentials } from "./mcp-server.js";
 import {
@@ -56,8 +57,10 @@ const PLATFORM_URLS: Record<Platform, string> = {
 // and presumably many more than six customers, a platform-only key meant any
 // two customers on the same platform bucket would collide and silently
 // receive each other's cached access token - a cross-tenant credential leak,
-// not a hypothetical. apiKey uniquely identifies the credential set without
-// needing to hash in apiSecretKey too.
+// not a hypothetical. The key also includes a SHA-256 digest of apiSecretKey
+// (never the secret itself): in gateway mode the caller supplies both values,
+// so a cached token must only be served to a request with the same full
+// credential pair. A wrong secret misses the cache and fails at Datto.
 const tokenCache = new Map<string, { accessToken: string; expiresAt: number }>();
 
 /**
@@ -88,7 +91,8 @@ async function throwIfRateLimited(response: Response, path: string): Promise<voi
 }
 
 function tokenCacheKey(creds: DattoCredentials): string {
-  return `${creds.platform}:${creds.apiKey}`;
+  const secretDigest = createHash("sha256").update(creds.apiSecretKey, "utf8").digest("base64url");
+  return `${creds.platform}:${creds.apiKey}:${secretDigest}`;
 }
 
 async function getAccessToken(creds: DattoCredentials): Promise<string> {
