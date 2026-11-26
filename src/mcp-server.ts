@@ -34,11 +34,16 @@ import {
   buildAlertCard,
 } from "./alert-card.js";
 import { ALERT_CARD_HTML } from "./generated/alert-card-html.js";
-import { getDevicePatches, getSitePatches } from "./patches.js";
+import { dattoApiGet, getDevicePatches, getSitePatches } from "./patches.js";
 import { parseDeviceUid, parseUdfFields } from "./udf.js";
 import { listDeviceJobs } from "./device-jobs.js";
+import { rateLimitDetails } from "./rate-limit.js";
+import { siteHardware, siteHardwareConfig, DEFAULT_MAX_DEVICES, SITE_DEVICE_LIST_LIMIT } from "./site-hardware.js";
+import { hiddenUdfKeys, redactUdfs } from "./udf-redact.js";
 import {
   applyUntrustedContentMarkers,
+  markersEnabled,
+  wrapUntrustedContent,
   type ToolResultLike,
 } from "./untrusted-content.js";
 
@@ -125,7 +130,22 @@ function createClient(creds: DattoCredentials): DattoRmmClient {
     apiKey: creds.apiKey,
     apiSecretKey: creds.apiSecretKey,
     platform: creds.platform,
+    // Never retry a 429: Datto blocks the source IP (403, about 5 minutes)
+    // when requests continue after one. Older SDKs retry 3 times by default.
+    rateLimit: { maxRetries: 0 },
   });
+}
+
+/** Environment warnings already logged, so each is reported once per process. */
+const loggedConfigWarnings = new Set<string>();
+
+/** Logs invalid DATTO_SITE_HARDWARE_* values to stderr (stdout carries the stdio transport). */
+function warnSiteHardwareConfig(warnings: string[]): void {
+  for (const warning of warnings) {
+    if (loggedConfigWarnings.has(warning)) continue;
+    loggedConfigWarnings.add(warning);
+    console.error(`[datto-rmm-mcp] ${warning}`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -142,6 +162,40 @@ async function collectItems<T>(
     if (items.length >= max) break;
   }
   return items;
+}
+
+/**
+ * Lists a site's devices page by page (at most `max`), calling `pace` before every page
+ * request so the pages share the hardware scans' pacing, and stopping as soon as `signal`
+ * is aborted. Each next page is the `nextPageUrl` Datto returns.
+ *
+ * Pages are read with dattoApiGet, one attempt each: the SDK re-sends a read once after a
+ * 5xx, and that retry would not check the shared backoff.
+ */
+async function listSiteDevicesPaced(
+  creds: DattoCredentials,
+  siteUid: string,
+  max: number,
+  signal: AbortSignal,
+  pace: () => Promise<void>,
+  beforeSend: () => void
+): Promise<unknown[]> {
+  const items: unknown[] = [];
+  let next: string | null = `/v2/site/${encodeURIComponent(siteUid)}/devices`;
+  while (next && items.length < max) {
+    await pace();
+    if (signal.aborted) break;
+    const response: { devices?: unknown[]; pageDetails?: { nextPageUrl?: string | null } } = await dattoApiGet(
+      creds,
+      next,
+      beforeSend
+    );
+    items.push(...(response.devices ?? []));
+    if (signal.aborted) break;
+    const following: string | null = response.pageDetails?.nextPageUrl ?? null;
+    next = following && following !== next ? following : null;
+  }
+  return items.slice(0, max);
 }
 
 // ---------------------------------------------------------------------------
@@ -444,6 +498,9 @@ export function createMcpServer(
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
+    // DATTO_SITE_HARDWARE_PAGE_SIZE sets the per-call device cap shown below.
+    const siteHardwarePageSize = siteHardwareConfig().pageSize;
+    const siteHardwareDefaultMax = Math.min(DEFAULT_MAX_DEVICES, siteHardwarePageSize);
     return {
       tools: [
         {
@@ -814,6 +871,29 @@ export function createMcpServer(
           },
         },
         {
+          name: "datto_site_hardware",
+          description:
+            "Manufacturer, model and serial number of the devices in one site (with hostname, device type and online state). " +
+            "The device list and device details do not include manufacturer or model; this reads each device's audit, " +
+            `paced to stay inside Datto's rate limit, up to ${siteHardwarePageSize} devices per call (default ${siteHardwareDefaultMax}). ` +
+            "Use it to find devices by manufacturer or model, or with none recorded. When the result has nextOffset, " +
+            "call again with that offset to continue. Devices are sorted by hostname.",
+          annotations: { readOnlyHint: true },
+          inputSchema: {
+            type: "object",
+            properties: {
+              siteUid: { type: "string", description: "The site UID (from datto_list_sites)" },
+              offset: { type: "number", description: "Start at this position in the hostname-sorted list (default 0)", default: 0 },
+              max: {
+                type: "number",
+                description: `Most devices to read in this call (default ${siteHardwareDefaultMax}, max ${siteHardwarePageSize})`,
+                default: siteHardwareDefaultMax,
+              },
+            },
+            required: ["siteUid"],
+          },
+        },
+        {
           name: "datto_get_site_patches",
           description:
             "Get Windows patch installation status across all devices in a site",
@@ -949,7 +1029,7 @@ export function createMcpServer(
 
           return {
             content: [
-              { type: "text", text: JSON.stringify(devices ?? [], null, 2) },
+              { type: "text", text: JSON.stringify(redactUdfs(devices ?? [], hiddenUdfKeys()), null, 2) },
             ],
           };
         }
@@ -1004,8 +1084,10 @@ export function createMcpServer(
             content: [
               {
                 type: "text",
+                // The matches are a fixed field list with no `udf` today; redact
+                // anyway so a field added later cannot expose a hidden UDF.
                 text: JSON.stringify(
-                  { count: devices.length, devices },
+                  redactUdfs({ count: devices.length, devices }, hiddenUdfKeys()),
                   null,
                   2
                 ),
@@ -1017,9 +1099,10 @@ export function createMcpServer(
         case "datto_get_device": {
           const { deviceUid } = args as { deviceUid: string };
           const device = await client.devices.get(deviceUid);
+          // UDFs named in DATTO_HIDDEN_UDFS (licence keys, passwords, ...) are hidden.
           return {
             content: [
-              { type: "text", text: JSON.stringify(device ?? {}, null, 2) },
+              { type: "text", text: JSON.stringify(redactUdfs(device ?? {}, hiddenUdfKeys()), null, 2) },
             ],
           };
         }
@@ -1294,7 +1377,8 @@ export function createMcpServer(
 
           return {
             content: [
-              { type: "text", text: JSON.stringify(audit ?? {}, null, 2) },
+              // Redacted in case the audit embeds the device record and its udf block.
+              { type: "text", text: JSON.stringify(redactUdfs(audit ?? {}, hiddenUdfKeys()), null, 2) },
             ],
           };
         }
@@ -1310,6 +1394,55 @@ export function createMcpServer(
               { type: "text", text: JSON.stringify(result ?? {}, null, 2) },
             ],
           };
+        }
+
+        case "datto_site_hardware": {
+          const { siteUid, offset, max } = args as { siteUid: string; offset?: number; max?: number };
+          if (!siteUid?.trim()) {
+            return { content: [{ type: "text", text: "Error: siteUid must not be empty" }], isError: true };
+          }
+          // DATTO_SITE_HARDWARE_BUDGET_MS / DATTO_SITE_HARDWARE_PAGE_SIZE; a bad value is reported once.
+          const config = siteHardwareConfig();
+          warnSiteHardwareConfig(config.warnings);
+          const result = await siteHardware(
+            siteUid,
+            {
+              // One more than the limit, so a site larger than the limit is reported as truncated.
+              listDevices: (signal, pace, beforeSend) =>
+                listSiteDevicesPaced(creds, siteUid, SITE_DEVICE_LIST_LIMIT + 1, signal, pace, beforeSend),
+              // One attempt per audit (dattoApiGet), not the SDK, whose 5xx retry would
+              // ignore a backoff recorded by another call in the meantime.
+              audit: (deviceUid, beforeSend) =>
+                dattoApiGet(creds, `/v2/audit/device/${encodeURIComponent(deviceUid)}`, beforeSend),
+            },
+            { offset, max, budgetMs: config.budgetMs, pageSize: config.pageSize }
+          );
+          if (result.rateLimited) {
+            // A rate limit is an error, so callers back off before continuing; the rows read so
+            // far are kept after the message.
+            return {
+              // Error results are not wrapped by applyUntrustedContentMarkers, so the partial rows
+              // (device-reported hostnames and audit fields) are wrapped here.
+              content: [
+                {
+                  type: "text",
+                  text:
+                    `Error: ${result.rateLimited.message}
+
+Partial result:
+` +
+                    (markersEnabled()
+                      ? wrapUntrustedContent("datto_site_hardware", JSON.stringify(result, null, 2))
+                      : JSON.stringify(result, null, 2)),
+                },
+              ],
+              isError: true,
+              ...(result.rateLimited.retryAfterSeconds !== undefined
+                ? { structuredContent: { error_type: "rate_limited", retry_after_seconds: result.rateLimited.retryAfterSeconds } }
+                : {}),
+            };
+          }
+          return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
         }
 
         case "datto_get_site_patches": {
@@ -1353,10 +1486,16 @@ export function createMcpServer(
           };
       }
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
+        // rateLimitDetails makes a 429 / IP block say "HTTP 429" or "HTTP 403"
+        // and "Try again in N s." whichever SDK version threw it, and gives
+        // the same N as retry_after_seconds on the structured error.
+        const { message, retryAfterSeconds } = rateLimitDetails(error);
         return {
           content: [{ type: "text", text: `Error: ${message}` }],
           isError: true,
+          ...(retryAfterSeconds !== undefined
+            ? { structuredContent: { error_type: "rate_limited", retry_after_seconds: retryAfterSeconds } }
+            : {}),
         };
       }
     })();

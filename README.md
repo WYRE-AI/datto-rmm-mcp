@@ -98,6 +98,9 @@ Copy [`.env.example`](.env.example). Stdio and `AUTH_MODE=env` read vendor crede
 | `DATTO_API_KEY` | For stdio and `AUTH_MODE=env` | Datto RMM API key |
 | `DATTO_API_SECRET` | For stdio and `AUTH_MODE=env` | Datto RMM API secret |
 | `DATTO_PLATFORM` | No | API platform: `pinotage`, `merlot`, `concord` (default), `vidal`, `zinfandel`, or `syrah` |
+| `DATTO_HIDDEN_UDFS` | No | User-defined fields to hide in device results (`datto_list_devices`, `datto_get_device`, `datto_find_device`, `datto_get_device_audit`), comma separated (example: `3,4,28`). Each listed UDF that has a value shows as `[hidden]`, so licence keys or passwords kept in UDFs are not handed to callers. It hides values in tool output only: it does not stop `datto_set_device_udf` from writing a listed UDF. Unset hides nothing |
+| `DATTO_SITE_HARDWARE_BUDGET_MS` | No | Time budget in milliseconds for one `datto_site_hardware` call (default `20000`, allowed `1000`-`300000`). When it runs out the call returns the devices read so far and a `nextOffset`. Raise it if your MCP client or gateway allows longer tool calls; lower it if calls time out. A value that is not a whole number is ignored and one out of range is clamped, with a warning on stderr |
+| `DATTO_SITE_HARDWARE_PAGE_SIZE` | No | Most devices one `datto_site_hardware` call reads (default `100`, allowed `1`-`250`, the Datto RMM API page limit). The tool's `max` argument is capped at this, and its default (50) is lowered to it. Invalid values are handled as for the budget |
 | `MCP_TRANSPORT` | No | `stdio` (default) or `http` |
 | `AUTH_MODE` | No | `env` (image default) or `gateway` (Compose default). Gateway mode requires `X-Datto-API-Key` and `X-Datto-API-Secret` on each `/mcp` request and never falls back to `DATTO_*`. `env` uses those variables only after S2S auth succeeds. |
 | `CONDUIT_S2S_SECRET` | Yes for HTTP | Service-to-service secret. The HTTP server logs an error and exits non-zero when this is empty or a known placeholder (`changeme`, `placeholder`, `your-s2s-secret`, `replace-with-a-real-secret`, and the other example values in code). Compose will not start without it. Never commit a real value. Generate one with `openssl rand -hex 32`. |
@@ -156,6 +159,7 @@ run anything are never annotated as read-only.
 | `datto_list_device_jobs` | List recent job runs on a device (newest first, optional date window and name filter) to find a job UID for the job tools above. Needs the API user's Audit: View permission | Yes |
 | `datto_get_device_audit` | Get device audit data (full or software only) | Yes |
 | `datto_get_device_patches` | Get Windows patch installation status for a device | Yes |
+| `datto_site_hardware` | Manufacturer, model and serial number of the devices in one site (reads each device audit, paced for the rate limit; up to 100 devices or 20 s per call by default, see `DATTO_SITE_HARDWARE_*`; continue with `nextOffset`) | Yes |
 | `datto_get_site_patches` | Get Windows patch installation status across all devices in a site | Yes |
 | `datto_set_device_udf` | Set user-defined fields (udf1-udf300) on a device | No |
 
