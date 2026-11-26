@@ -286,6 +286,59 @@ describe("siteHardware ordering, shared pacing and deadline", () => {
     for (let i = 1; i < sorted.length; i++) expect(sorted[i] - sorted[i - 1]).toBeGreaterThanOrEqual(300);
   });
 
+  it("takes no listing slot that cannot be used within the budget, so it cannot hold up other calls", async () => {
+    const pacer = new AuditPacer();
+    pacer.reserve(0, 5_000); // other calls hold the next 5 s of slots
+    let requests = 0;
+    await expect(
+      siteHardware(
+        "s",
+        {
+          listDevices: async (signal, pace) => {
+            await pace();
+            if (signal.aborted) return [];
+            requests++;
+            return devices(1);
+          },
+          audit: async (u) => audit(u),
+          ...clock(),
+          pacer,
+        },
+        { budgetMs: 1_000 }
+      )
+    ).rejects.toThrow(/took longer than the 1 s time budget/);
+    expect(requests).toBe(0);
+    expect(pacer.waitFor(0)).toBe(5_000); // no slot was added
+  });
+
+  it("requests no further listing page when a pacing wait overruns the budget", async () => {
+    let t = 0;
+    let requests = 0;
+    await expect(
+      siteHardware(
+        "s",
+        {
+          listDevices: async (signal, pace) => {
+            for (let page = 0; page < 3; page++) {
+              await pace();
+              if (signal.aborted) break;
+              requests++;
+            }
+            return devices(3);
+          },
+          audit: async (u) => audit(u),
+          now: () => t,
+          sleep: async (ms: number) => {
+            t += ms + 2_000; // the timer fires late
+          },
+          pacer: new AuditPacer(),
+        },
+        { gapMs: 300, budgetMs: 1_000 }
+      )
+    ).rejects.toThrow(/took longer than the 1 s time budget/);
+    expect(requests).toBe(1);
+  });
+
   it("does not start any audit when listing the devices outlasts the budget", async () => {
     let calls = 0;
     await expect(

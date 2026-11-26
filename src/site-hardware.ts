@@ -293,20 +293,32 @@ export async function siteHardware(
   // Aborted at the deadline, or when any call records a rate limit, so a multi-page
   // listing stops requesting pages.
   const listing = new AbortController();
-  const stopListening = pacer.onBackOff(() => listing.abort());
+  // Why the listing was stopped: the time budget ran out, or a rate limit was recorded.
+  let listingStop: "deadline" | "backoff" | undefined;
+  const stopListing = (reason: "deadline" | "backoff") => {
+    listingStop ??= reason;
+    listing.abort();
+  };
+  const stopListening = pacer.onBackOff(() => stopListing("backoff"));
   let listedOrTimeout: unknown[] | typeof TIMED_OUT;
   try {
     const paceListingPage = async (): Promise<void> => {
-      const wait = pacer.reserve(now(), gapMs);
+      // Like the audit loop: never take a slot that cannot be used within the budget
+      // (an unused slot would hold up every other call), and recheck after the wait,
+      // which can overrun.
+      const at = now();
+      if (at - started + pacer.waitFor(at) >= budgetMs) return stopListing("deadline");
+      const wait = pacer.reserve(at, gapMs);
       if (wait > 0) await sleep(wait);
+      if (remaining() <= 0) stopListing("deadline");
     };
     listedOrTimeout = await withDeadline(observeRateLimit(deps.listDevices(listing.signal, paceListingPage)), remaining(), () =>
-      listing.abort()
+      stopListing("deadline")
     );
   } finally {
     stopListening();
   }
-  if (listedOrTimeout === TIMED_OUT) {
+  if (listedOrTimeout === TIMED_OUT || listingStop === "deadline") {
     throw new Error(
       `Listing the devices in site ${siteUid} took longer than the ${Math.ceil(budgetMs / 1000)} s time budget, so no audits were read. Try again.`
     );
