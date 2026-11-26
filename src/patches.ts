@@ -78,8 +78,9 @@ async function throwIfRateLimited(response: Response, path: string): Promise<voi
     throw new DattoRateLimitedError(path, seconds);
   }
   if (response.status === 403) {
-    // Read a copy: the caller may still need the body for its own error.
-    const confirmed = looksLikeIpBlock(await response.clone().text());
+    // Read a copy: the caller may still need the body for its own error. A truncated
+    // body reads as empty, so the cooldown check below still applies.
+    const confirmed = looksLikeIpBlock(await response.clone().text().catch(() => ""));
     if (confirmed) {
       noteRateLimited();
       throw new DattoIpBlockedError(path);

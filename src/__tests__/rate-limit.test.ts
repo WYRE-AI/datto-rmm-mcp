@@ -300,6 +300,18 @@ describe("IP-block 403 on a direct call", () => {
     expect(ipBlockSuspected(Date.now() + 11_000)).toBe(true);
   });
 
+  it("is still the IP block during the cooldown when the 403 body is truncated", async () => {
+    noteRateLimited(60, Date.now() - 50_000);
+    stubFetch((url) =>
+      url.startsWith(PATCHES)
+        ? new Response(new ReadableStream<Uint8Array>({ start(c) { c.error(new TypeError("terminated")); } }), { status: 403 })
+        : undefined
+    );
+    const result = await toolResult("datto_get_device_patches", { deviceUid: DEVICE });
+    expect(result?.structuredContent).toEqual({ error_type: "rate_limited", retry_after_seconds: 300 });
+    expect(ipBlockSuspected(Date.now() + 11_000)).toBe(false);
+  });
+
   it("leaves a permissions 403 alone when no rate limit has been seen", async () => {
     stubFetch((url) => (url.startsWith(PATCHES) ? forbidden("Forbidden") : undefined));
     const result = await toolResult("datto_get_device_patches", { deviceUid: DEVICE });

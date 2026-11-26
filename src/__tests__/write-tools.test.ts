@@ -369,6 +369,17 @@ describe("writes are sent once and never retried", () => {
     expect(tokenRequests()).toBe(before + 1);
   });
 
+  it("a 403 with a truncated body during the cooldown is still an IP block, without renewing it", async () => {
+    noteRateLimited(60, Date.now() - 50_000);
+    stubDatto(
+      () =>
+        new Response(new ReadableStream<Uint8Array>({ start(c) { c.error(new TypeError("terminated")); } }), { status: 403 })
+    );
+    const result = await call("datto_resolve_alert", { alertUid: "alert-1" });
+    expect(result.structuredContent).toEqual({ error_type: "rate_limited", retry_after_seconds: 300 });
+    expect(ipBlockSuspected(Date.now() + 11_000)).toBe(false);
+  });
+
   it("a 401 on a write is not re-sent", async () => {
     const calls = stubDatto(() => json({}, 401));
     const result = await call("datto_resolve_alert", { alertUid: "alert-1" });

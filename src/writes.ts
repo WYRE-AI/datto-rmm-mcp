@@ -104,7 +104,17 @@ export async function dattoApiWrite(
     forgetAccessToken(creds);
   }
 
-  const text = await response.text();
+  let text: string;
+  try {
+    text = await response.text();
+  } catch (error) {
+    // A truncated body must not hide a 403 that the cooldown says is the IP block.
+    // Presumed only, so it does not renew the cooldown.
+    if (response.status === 403 && ipBlockSuspected()) {
+      throw new DattoIpBlockedError(path, IP_BLOCK_WAIT_SECONDS, true);
+    }
+    throw error;
+  }
 
   if (response.status === 403) {
     if (looksLikeIpBlock(text)) {
