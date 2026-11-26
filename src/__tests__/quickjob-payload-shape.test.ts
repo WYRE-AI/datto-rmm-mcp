@@ -73,6 +73,27 @@ function stubFetch(
     }
     const stubbed = handler(url, init);
     if (stubbed) return stubbed;
+    // The checks that run before a quick job: the component exists (with
+    // the variables it declares) and the device exists.
+    if (url === `${DATTO_HOST}/api/v2/account/components`) {
+      return jsonResponse({
+        pageDetails: { nextPageUrl: null },
+        components: [
+          {
+            uid: "component-789",
+            name: "Restart Service",
+            variables: [
+              { name: "param1", type: "string" },
+              { name: "param2", type: "string" },
+            ],
+          },
+          { uid: "component-000", name: "No Vars", variables: [] },
+        ],
+      });
+    }
+    if (url === `${DATTO_HOST}/api/v2/device/device-456`) {
+      return jsonResponse({ uid: "device-456", siteUid: "site-1" });
+    }
     throw new Error(`Unstubbed fetch in test: ${init?.method ?? "GET"} ${url}`);
   }) as typeof fetch;
 }

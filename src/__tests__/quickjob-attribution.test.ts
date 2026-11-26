@@ -31,6 +31,22 @@ function stubQuickJob(capture: { body?: unknown }) {
         headers: { "Content-Type": "application/json" },
       });
     }
+    // The checks that run before a quick job: the component exists, the device exists.
+    if (url.endsWith("/api/v2/account/components") && (init?.method ?? "GET") === "GET") {
+      return new Response(
+        JSON.stringify({
+          pageDetails: { nextPageUrl: null },
+          components: [{ uid: "component-1", name: "Restart Service", variables: [] }],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    }
+    if (url.endsWith("/api/v2/device/device-1") && (init?.method ?? "GET") === "GET") {
+      return new Response(JSON.stringify({ uid: "device-1", siteUid: "site-1" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
     if (url.includes("/quickjob") && init?.method === "PUT") {
       capture.body = JSON.parse(String(init.body));
       return new Response(
@@ -186,6 +202,19 @@ describe("quick job attribution", () => {
     const name = (capture.body as { jobName: string }).jobName;
     const suffix = name.slice(name.indexOf("[") + 1, -1);
     expect(suffix.length).toBeLessThanOrEqual(64);
+  });
+
+  it("keeps an attributed name within the 100-character limit, shortening the caller's part", async () => {
+    const capture: { body?: unknown } = {};
+    stubQuickJob(capture);
+    const upn = `${"u".repeat(40)}@example.com`;
+
+    await runQuickJob(ENV_GATEWAY, { ...GATEWAY_HEADERS, "X-Mcp-User-Upn": upn }, "J".repeat(100));
+
+    const name = (capture.body as { jobName: string }).jobName;
+    expect(name.length).toBeLessThanOrEqual(100);
+    expect(name.endsWith(` [${upn}]`)).toBe(true);
+    expect(name.startsWith("J".repeat(100 - upn.length - 3))).toBe(true);
   });
 
   it("keeps a caller's own bracketed text and adds attribution after it", async () => {

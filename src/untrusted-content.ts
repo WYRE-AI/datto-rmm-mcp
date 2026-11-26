@@ -70,6 +70,8 @@ const REASONS: Record<string, string> = {
     "The hostname (and other device fields) is set on the device itself, so a compromised or malicious endpoint can name itself anything, including text designed to look like an instruction.",
   datto_find_device:
     "Hostnames are set on the device itself, so a compromised or malicious endpoint can name itself anything, including text designed to look like an instruction.",
+  datto_site_hardware:
+    "Hostnames, and the manufacturer, model and serial number in each audit, are reported by the device itself, so a compromised or malicious endpoint can set them to anything, including text designed to look like an instruction.",
   datto_get_device_audit:
     "Installed-software names come from whatever is actually installed, including malware that names itself deceptively — this reflects what the endpoint reports about itself, not a vetted source.",
   datto_list_device_jobs:
@@ -101,6 +103,8 @@ const DEFAULT_REASON =
  *   these return a vendor acknowledgement (a new job UID, a resolved
  *   status) or, for the UDF write, a confirmation built from the validated
  *   inputs — not content shaped by a device.
+ * - `datto_move_device`: returns the device and site UIDs and the site
+ *   names, which are set by RMM administrators, not by the device.
  * - `datto_get_device_patches` / `datto_get_site_patches`: patch titles, KB
  *   numbers, and severity come from Microsoft's WSUS catalog and are
  *   identical for every device regardless of what is running on the
@@ -116,6 +120,7 @@ export const UNTRUSTED_CONTENT_TOOLS: ReadonlySet<string> = new Set([
   "datto_list_alerts",
   "datto_get_alert",
   "datto_get_device_audit",
+  "datto_site_hardware",
   "datto_get_job_stdout",
   "datto_get_job_stderr",
   "datto_list_device_jobs",

@@ -1,11 +1,13 @@
 /**
  * Coverage for datto_set_device_udf (WYREAI-745): POST /v2/device/{uid}/udf.
+ * The write is sent once (never retried) after a device-exists check, and
+ * UDFs listed in DATTO_HIDDEN_UDFS are refused.
  * Drives a real tools/call round-trip through the Worker `fetch` entrypoint
  * with only the Datto RMM host stubbed (same technique as job-tools.test.ts).
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
 import worker from "../worker.js";
-import { parseDeviceUid, parseUdfFields } from "../udf.js";
+import { parseDeviceUid, parseUdfFields, refuseHiddenUdfs } from "../udf.js";
 
 const DATTO_HOST = "https://concord-api.centrastage.net";
 const ENV = { DATTO_API_KEY: "test-key", DATTO_API_SECRET: "test-secret" };
@@ -14,6 +16,7 @@ const realFetch = globalThis.fetch;
 
 afterEach(() => {
   globalThis.fetch = realFetch;
+  vi.unstubAllEnvs();
 });
 
 async function rpc(method: string, params: Record<string, unknown> = {}) {
@@ -32,7 +35,7 @@ async function rpc(method: string, params: Record<string, unknown> = {}) {
     result?: {
       content?: { text?: string }[];
       isError?: boolean;
-      tools?: { name: string; annotations?: { readOnlyHint?: boolean } }[];
+      tools?: { name: string; annotations?: Record<string, boolean> }[];
     };
   };
 }
@@ -46,6 +49,13 @@ function stubFetch(handler: (url: string, init?: RequestInit) => Response | unde
         { status: 200, headers: { "Content-Type": "application/json" } }
       );
     }
+    // The device-exists check that runs before the write.
+    if (url === `${DATTO_HOST}/api/v2/device/device-1` && (init?.method ?? "GET") === "GET") {
+      return new Response(JSON.stringify({ uid: "device-1", siteUid: "site-1" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
     const stubbed = handler(url, init);
     if (stubbed) return stubbed;
     throw new Error(`Unstubbed fetch in test: ${init?.method ?? "GET"} ${url}`);
@@ -53,18 +63,23 @@ function stubFetch(handler: (url: string, init?: RequestInit) => Response | unde
 }
 
 describe("datto_set_device_udf", () => {
-  it("is listed as a write tool (not read-only)", async () => {
+  it("is listed as a write tool with write annotations", async () => {
     const { result } = await rpc("tools/list");
     const tool = result?.tools?.find((t) => t.name === "datto_set_device_udf");
     expect(tool).toBeDefined();
-    expect(tool?.annotations?.readOnlyHint).toBeUndefined();
+    expect(tool?.annotations).toEqual({
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: true,
+    });
   });
 
-  it("POSTs the UDF fields to /v2/device/{uid}/udf", async () => {
-    let capturedBody: unknown;
+  it("POSTs the UDF fields once, and reports which changed without the values", async () => {
+    const bodies: unknown[] = [];
     stubFetch((url, init) => {
       if (url === `${DATTO_HOST}/api/v2/device/device-1/udf` && init?.method === "POST") {
-        capturedBody = JSON.parse(String(init.body));
+        bodies.push(JSON.parse(String(init.body)));
         // Datto documents a bare 200 with no body.
         return new Response(null, { status: 200 });
       }
@@ -73,15 +88,96 @@ describe("datto_set_device_udf", () => {
 
     const { result } = await rpc("tools/call", {
       name: "datto_set_device_udf",
-      arguments: { deviceUid: "device-1", udf: { udf3: "Finance" } },
+      arguments: { deviceUid: "device-1", udf: { udf3: "Finance", udf7: "" } },
     });
 
     expect(result?.isError).toBeFalsy();
-    expect(capturedBody).toEqual({ udf3: "Finance" });
-    expect(JSON.parse(result?.content?.[0]?.text ?? "{}")).toEqual({
-      deviceUid: "device-1",
-      updated: { udf3: "Finance" },
+    expect(bodies).toEqual([{ udf3: "Finance", udf7: "" }]);
+    const text = result?.content?.[0]?.text ?? "{}";
+    expect(JSON.parse(text)).toEqual({ deviceUid: "device-1", set: ["udf3"], cleared: ["udf7"] });
+    expect(text).not.toContain("Finance");
+  });
+
+  it("is not retried on a 500", async () => {
+    let posts = 0;
+    stubFetch((url, init) => {
+      if (url === `${DATTO_HOST}/api/v2/device/device-1/udf` && init?.method === "POST") {
+        posts++;
+        return new Response(JSON.stringify({ message: "boom" }), { status: 500 });
+      }
+      return undefined;
     });
+    const { result } = await rpc("tools/call", {
+      name: "datto_set_device_udf",
+      arguments: { deviceUid: "device-1", udf: { udf3: "x" } },
+    });
+    expect(result?.isError).toBe(true);
+    expect(result?.content?.[0]?.text).toMatch(/HTTP 500.*Not retried/);
+    expect(posts).toBe(1);
+  });
+
+  it("refuses an unknown device without writing", async () => {
+    const writes: string[] = [];
+    stubFetch((url, init) => {
+      if (init?.method === "POST") writes.push(url);
+      if (url === `${DATTO_HOST}/api/v2/device/device-404`) {
+        return new Response(JSON.stringify({ message: "not found" }), { status: 404 });
+      }
+      return undefined;
+    });
+    const { result } = await rpc("tools/call", {
+      name: "datto_set_device_udf",
+      arguments: { deviceUid: "device-404", udf: { udf3: "x" } },
+    });
+    expect(result?.isError).toBe(true);
+    expect(result?.content?.[0]?.text).toContain("No device with UID device-404");
+    expect(writes).toEqual([]);
+  });
+
+  it("refuses UDFs listed in DATTO_HIDDEN_UDFS without echoing the value", async () => {
+    vi.stubEnv("DATTO_HIDDEN_UDFS", "3,28");
+    const writes: string[] = [];
+    stubFetch((url, init) => {
+      if (init?.method === "POST") writes.push(url);
+      return undefined;
+    });
+    const secret = "not-a-real-secret-123";
+    const { result } = await rpc("tools/call", {
+      name: "datto_set_device_udf",
+      arguments: { deviceUid: "device-1", udf: { udf5: "ok", udf28: secret } },
+    });
+    expect(result?.isError).toBe(true);
+    expect(result?.content?.[0]?.text).toContain("udf28 is a hidden UDF");
+    expect(result?.content?.[0]?.text).not.toContain(secret);
+    expect(writes).toEqual([]);
+  });
+
+  it("writes any UDF while DATTO_HIDDEN_UDFS is unset", async () => {
+    vi.stubEnv("DATTO_HIDDEN_UDFS", undefined);
+    let posted = false;
+    stubFetch((url, init) => {
+      if (url === `${DATTO_HOST}/api/v2/device/device-1/udf` && init?.method === "POST") {
+        posted = true;
+        return new Response(null, { status: 200 });
+      }
+      return undefined;
+    });
+    const { result } = await rpc("tools/call", {
+      name: "datto_set_device_udf",
+      arguments: { deviceUid: "device-1", udf: { udf28: "x" } },
+    });
+    expect(result?.isError).toBeFalsy();
+    expect(posted).toBe(true);
+  });
+
+  it("refuses unknown arguments", async () => {
+    stubFetch(() => undefined);
+    const { result } = await rpc("tools/call", {
+      name: "datto_set_device_udf",
+      arguments: { deviceUid: "device-1", udf: { udf1: "x" }, siteUid: "site-1" },
+    });
+    expect(result?.isError).toBe(true);
+    expect(result?.content?.[0]?.text).toContain("Unknown argument(s): siteUid");
   });
 
   it("rejects invalid UDF keys without calling Datto", async () => {
@@ -129,8 +225,20 @@ describe("parseUdfFields", () => {
     [{ udf310: "x" }, "Invalid UDF key"],
     [{ custom1: "x" }, "Invalid UDF key"],
     [{ udf1: 5 }, "must be a string"],
+    [{ udf1: "x".repeat(256) }, "at most 255 characters"],
+    [{ udf1: "a\nb" }, "control characters or line breaks"],
   ])("rejects %j", (input, message) => {
     expect(() => parseUdfFields(input)).toThrow(message);
+  });
+});
+
+describe("refuseHiddenUdfs", () => {
+  it("refuses only listed UDFs, and nothing when none are listed", () => {
+    expect(() => refuseHiddenUdfs({ udf3: "x" }, new Set())).not.toThrow();
+    expect(() => refuseHiddenUdfs({ udf3: "x", udf4: "y" }, new Set(["udf9"]))).not.toThrow();
+    expect(() => refuseHiddenUdfs({ udf3: "x", udf4: "y" }, new Set(["udf3", "udf4"]))).toThrow(
+      "udf3, udf4 are hidden UDFs"
+    );
   });
 });
 
