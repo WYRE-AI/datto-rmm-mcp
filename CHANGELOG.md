@@ -69,6 +69,7 @@
   "No devices found" error on zero matches rather than an empty success.
   Idea and original implementation by [@DDePuy2015](https://github.com/DDePuy2015)
   in [#54](https://github.com/wyre-technology/datto-rmm-mcp/pull/54).
+- **`datto_list_activity_logs` tool:** read-only search of the account Activity Log (`GET /v2/activity-logs`) with the documented filters: `from`/`until` (default the last 7 days; Datto keeps 180), `entity` (`user` or `device`), `category`, `action`, `siteId`, `userId`, `hostname` (as an Activity Log search) and a raw `search` query. `user` matches the username or first/last name of the RMM user who did the action, because the API filters users only by numeric id; each row returns that `userId` for a faster follow-up. Rows are compact (time, entity, category, action, user, site, hostname, details with long values cut), with a `category/action` summary, and an opaque `nextCursor` that resumes exactly where a call stopped, even part-way through a page. At most 10 pages are read per call, a 429 is not retried, an empty result says so and why it might be empty, and the output is marked as untrusted content.
 
 ### Fixed
 

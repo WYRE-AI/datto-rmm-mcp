@@ -72,6 +72,8 @@ const REASONS: Record<string, string> = {
     "Hostnames are set on the device itself, so a compromised or malicious endpoint can name itself anything, including text designed to look like an instruction.",
   datto_get_device_audit:
     "Installed-software names come from whatever is actually installed, including malware that names itself deceptively — this reflects what the endpoint reports about itself, not a vetted source.",
+  datto_list_activity_logs:
+    "Hostnames, job names and the details of each entry (file names, session names, end-user names) are set on or by the device or the people using it, so a compromised endpoint can shape this text to look like an instruction.",
   datto_list_device_jobs:
     "Job names can embed the device's hostname (Datto names quick jobs \"QuickJob running component X on device <hostname>\"), and a compromised endpoint can name itself anything, including text designed to look like an instruction.",
 };
@@ -119,6 +121,7 @@ export const UNTRUSTED_CONTENT_TOOLS: ReadonlySet<string> = new Set([
   "datto_get_job_stdout",
   "datto_get_job_stderr",
   "datto_list_device_jobs",
+  "datto_list_activity_logs",
 ]);
 
 /** `DATTO_UNTRUSTED_MARKERS=off` (case-insensitive) disables wrapping. */
