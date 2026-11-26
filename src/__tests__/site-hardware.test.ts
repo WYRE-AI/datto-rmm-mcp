@@ -259,6 +259,33 @@ describe("siteHardware ordering, shared pacing and deadline", () => {
     resetRateLimitState();
   });
 
+  it("paces device-list pages and audits together on the shared pacer", async () => {
+    let t = 0;
+    const starts: number[] = [];
+    const pacer = new AuditPacer();
+    const deps = {
+      listDevices: async (_signal: AbortSignal, pace: () => Promise<void>) => {
+        for (let page = 0; page < 3; page++) {
+          await pace();
+          starts.push(t);
+        }
+        return devices(2);
+      },
+      audit: async (u: string) => (starts.push(t), audit(u)),
+      now: () => t,
+      sleep: async (ms: number) => {
+        const target = t + ms;
+        await new Promise((r) => setTimeout(r, 0));
+        t = Math.max(t, target);
+      },
+      pacer,
+    };
+    await Promise.all([siteHardware("s1", deps, { gapMs: 300 }), siteHardware("s2", deps, { gapMs: 300 })]);
+    expect(starts).toHaveLength(10); // 2 x (3 pages + 2 audits)
+    const sorted = [...starts].sort((x, y) => x - y);
+    for (let i = 1; i < sorted.length; i++) expect(sorted[i] - sorted[i - 1]).toBeGreaterThanOrEqual(300);
+  });
+
   it("does not start any audit when listing the devices outlasts the budget", async () => {
     let calls = 0;
     await expect(

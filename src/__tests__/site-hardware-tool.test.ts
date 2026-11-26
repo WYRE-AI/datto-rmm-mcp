@@ -175,6 +175,37 @@ describe("datto_site_hardware after another tool's rate limit", () => {
   });
 });
 
+describe("datto_site_hardware device listing", () => {
+  it("follows nextPageUrl page by page, with the pages paced like audits", async () => {
+    const pageTimes: number[] = [];
+    const pageUrls: string[] = [];
+    globalThis.fetch = vi.fn(async (input) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.startsWith(`${DATTO_HOST}/auth/oauth/token`)) {
+        return json({ access_token: "fake-token", token_type: "bearer", expires_in: 3600 });
+      }
+      if (url.startsWith(`${DATTO_HOST}/api/v2/site/${SITE}/devices`)) {
+        pageTimes.push(Date.now());
+        pageUrls.push(url);
+        const second = new URL(url).searchParams.get("page") === "1";
+        return json({
+          pageDetails: { count: 1, nextPageUrl: second ? null : `${DATTO_HOST}/api/v2/site/${SITE}/devices?page=1&max=1` },
+          devices: [second ? { uid: "dev-b", hostname: "B" } : { uid: "dev-a", hostname: "A" }],
+        });
+      }
+      return json({ systemInfo: { manufacturer: "HP" } });
+    }) as typeof fetch;
+
+    const out = hardwareResult(
+      await rpc("tools/call", { name: "datto_site_hardware", arguments: { siteUid: SITE, max: 2 } })
+    ) as { returned: number; totalDevices?: number };
+    expect(pageUrls).toHaveLength(2);
+    expect(new URL(pageUrls[1]).searchParams.get("page")).toBe("1");
+    expect(out.totalDevices).toBe(2);
+    expect(pageTimes[1] - pageTimes[0]).toBeGreaterThanOrEqual(250);
+  });
+});
+
 describe("datto_site_hardware listing deadline", () => {
   it("stops paging through the site's devices once the time budget has passed", async () => {
     vi.stubEnv("DATTO_SITE_HARDWARE_BUDGET_MS", "1000");

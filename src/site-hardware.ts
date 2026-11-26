@@ -195,8 +195,12 @@ export interface SiteHardwareResult {
 }
 
 export interface SiteHardwareDeps {
-  /** Every device in the site (list entries as Datto returns them). */
-  listDevices: (signal: AbortSignal) => Promise<unknown[]>;
+  /**
+   * Every device in the site (list entries as Datto returns them). Call `pace` before each
+   * page request: it waits for a slot on the shared pacer, so listing pages and audits from
+   * every call together stay one request per gap. Stop when `signal` is aborted.
+   */
+  listDevices: (signal: AbortSignal, pace: () => Promise<void>) => Promise<unknown[]>;
   /** One device's full audit. */
   audit: (deviceUid: string) => Promise<unknown>;
   sleep?: (ms: number) => Promise<void>;
@@ -292,7 +296,11 @@ export async function siteHardware(
   const stopListening = pacer.onBackOff(() => listing.abort());
   let listedOrTimeout: unknown[] | typeof TIMED_OUT;
   try {
-    listedOrTimeout = await withDeadline(observeRateLimit(deps.listDevices(listing.signal)), remaining(), () =>
+    const paceListingPage = async (): Promise<void> => {
+      const wait = pacer.reserve(now(), gapMs);
+      if (wait > 0) await sleep(wait);
+    };
+    listedOrTimeout = await withDeadline(observeRateLimit(deps.listDevices(listing.signal, paceListingPage)), remaining(), () =>
       listing.abort()
     );
   } finally {

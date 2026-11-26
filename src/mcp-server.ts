@@ -154,17 +154,42 @@ function warnSiteHardwareConfig(warnings: string[]): void {
 
 async function collectItems<T>(
   iterable: AsyncIterable<T>,
-  max: number,
-  signal?: AbortSignal
+  max: number
 ): Promise<T[]> {
   const items: T[] = [];
   for await (const item of iterable) {
-    // Leaving the loop closes the iterator, so no further pages are requested.
-    if (signal?.aborted) break;
     items.push(item);
     if (items.length >= max) break;
   }
   return items;
+}
+
+/**
+ * Lists a site's devices page by page (at most `max`), calling `pace` before every page
+ * request so the pages share the hardware scans' pacing, and stopping as soon as `signal`
+ * is aborted. Each next page is the one Datto names in `nextPageUrl`.
+ */
+async function listSiteDevicesPaced(
+  client: DattoRmmClient,
+  siteUid: string,
+  max: number,
+  signal: AbortSignal,
+  pace: () => Promise<void>
+): Promise<unknown[]> {
+  const items: unknown[] = [];
+  let page: number | undefined;
+  while (items.length < max) {
+    await pace();
+    if (signal.aborted) break;
+    const response = await client.sites.devices(siteUid, page === undefined ? undefined : { page });
+    items.push(...(response.devices ?? []));
+    if (signal.aborted) break;
+    const next = response.pageDetails?.nextPageUrl;
+    const nextPage = next ? Number(new URL(next).searchParams.get("page")) : NaN;
+    if (!Number.isInteger(nextPage) || nextPage === page) break;
+    page = nextPage;
+  }
+  return items.slice(0, max);
 }
 
 // ---------------------------------------------------------------------------
@@ -1377,7 +1402,7 @@ export function createMcpServer(
             siteUid,
             {
               // One more than the limit, so a site larger than the limit is reported as truncated.
-              listDevices: (signal) => collectItems(client.sites.devicesAll(siteUid), SITE_DEVICE_LIST_LIMIT + 1, signal),
+              listDevices: (signal, pace) => listSiteDevicesPaced(client, siteUid, SITE_DEVICE_LIST_LIMIT + 1, signal, pace),
               audit: (deviceUid) => client.audit.device(deviceUid),
             },
             { offset, max, budgetMs: config.budgetMs, pageSize: config.pageSize }
