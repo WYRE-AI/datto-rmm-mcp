@@ -34,7 +34,7 @@ import {
   buildAlertCard,
 } from "./alert-card.js";
 import { ALERT_CARD_HTML } from "./generated/alert-card-html.js";
-import { getDevicePatches, getSitePatches } from "./patches.js";
+import { dattoApiGet, getDevicePatches, getSitePatches } from "./patches.js";
 import { parseDeviceUid, parseUdfFields } from "./udf.js";
 import { listDeviceJobs } from "./device-jobs.js";
 import { rateLimitDetails } from "./rate-limit.js";
@@ -167,27 +167,31 @@ async function collectItems<T>(
 /**
  * Lists a site's devices page by page (at most `max`), calling `pace` before every page
  * request so the pages share the hardware scans' pacing, and stopping as soon as `signal`
- * is aborted. Each next page is the one Datto names in `nextPageUrl`.
+ * is aborted. Each next page is the `nextPageUrl` Datto returns.
+ *
+ * Pages are read with dattoApiGet, one attempt each: the SDK re-sends a read once after a
+ * 5xx, and that retry would not check the shared backoff.
  */
 async function listSiteDevicesPaced(
-  client: DattoRmmClient,
+  creds: DattoCredentials,
   siteUid: string,
   max: number,
   signal: AbortSignal,
   pace: () => Promise<void>
 ): Promise<unknown[]> {
   const items: unknown[] = [];
-  let page: number | undefined;
-  while (items.length < max) {
+  let next: string | null = `/v2/site/${encodeURIComponent(siteUid)}/devices`;
+  while (next && items.length < max) {
     await pace();
     if (signal.aborted) break;
-    const response = await client.sites.devices(siteUid, page === undefined ? undefined : { page });
+    const response: { devices?: unknown[]; pageDetails?: { nextPageUrl?: string | null } } = await dattoApiGet(
+      creds,
+      next
+    );
     items.push(...(response.devices ?? []));
     if (signal.aborted) break;
-    const next = response.pageDetails?.nextPageUrl;
-    const nextPage = next ? Number(new URL(next).searchParams.get("page")) : NaN;
-    if (!Number.isInteger(nextPage) || nextPage === page) break;
-    page = nextPage;
+    const following: string | null = response.pageDetails?.nextPageUrl ?? null;
+    next = following && following !== next ? following : null;
   }
   return items.slice(0, max);
 }
@@ -1402,8 +1406,10 @@ export function createMcpServer(
             siteUid,
             {
               // One more than the limit, so a site larger than the limit is reported as truncated.
-              listDevices: (signal, pace) => listSiteDevicesPaced(client, siteUid, SITE_DEVICE_LIST_LIMIT + 1, signal, pace),
-              audit: (deviceUid) => client.audit.device(deviceUid),
+              listDevices: (signal, pace) => listSiteDevicesPaced(creds, siteUid, SITE_DEVICE_LIST_LIMIT + 1, signal, pace),
+              // One attempt per audit (dattoApiGet), not the SDK, whose 5xx retry would
+              // ignore a backoff recorded by another call in the meantime.
+              audit: (deviceUid) => dattoApiGet(creds, `/v2/audit/device/${encodeURIComponent(deviceUid)}`),
             },
             { offset, max, budgetMs: config.budgetMs, pageSize: config.pageSize }
           );

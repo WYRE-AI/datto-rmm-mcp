@@ -206,6 +206,30 @@ describe("datto_site_hardware device listing", () => {
   });
 });
 
+describe("datto_site_hardware single-attempt reads", () => {
+  it.each(["audit", "listing"])("sends a %s request that gets a 5xx only once (no SDK retry)", async (which) => {
+    const sent: string[] = [];
+    globalThis.fetch = vi.fn(async (input) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.startsWith(`${DATTO_HOST}/auth/oauth/token`)) {
+        return json({ access_token: "fake-token", token_type: "bearer", expires_in: 3600 });
+      }
+      sent.push(url);
+      if (url.startsWith(`${DATTO_HOST}/api/v2/site/${SITE}/devices`)) {
+        return which === "listing"
+          ? json({ message: "boom" }, 500)
+          : json({ pageDetails: { count: 1, nextPageUrl: null }, devices: [{ uid: "dev-a", hostname: "A" }] });
+      }
+      return json({ message: "boom" }, 503);
+    }) as typeof fetch;
+
+    await rpc("tools/call", { name: "datto_site_hardware", arguments: { siteUid: SITE } });
+    await new Promise((r) => setTimeout(r, 1_100)); // the SDK waits 1 s before its retry
+    const matching = sent.filter((u) => (which === "listing" ? u.includes("/devices") : u.includes("/audit/device/")));
+    expect(matching).toHaveLength(1);
+  });
+});
+
 describe("datto_site_hardware listing deadline", () => {
   it("stops paging through the site's devices once the time budget has passed", async () => {
     vi.stubEnv("DATTO_SITE_HARDWARE_BUDGET_MS", "1000");
