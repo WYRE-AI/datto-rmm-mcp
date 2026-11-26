@@ -158,6 +158,28 @@ export function isRateLimitError(error: unknown): boolean {
  * and a stated wait below 1 s is raised to 1 in the text as well.
  */
 export function rateLimitDetails(error: unknown): { message: string; retryAfterSeconds?: number } {
+  const details = describeRateLimit(error);
+  // Every tool reports its errors through here, so a confirmed rate limit seen by one
+  // tool reaches every listener (the hardware scans' shared pacer).
+  if (details.retryAfterSeconds !== undefined && isConfirmedRateLimit(error as ErrorShape)) {
+    for (const listener of [...rateLimitListeners]) listener(details.retryAfterSeconds);
+  }
+  return details;
+}
+
+const rateLimitListeners = new Set<(retryAfterSeconds: number) => void>();
+
+/**
+ * Calls `listener` with the wait in seconds whenever a confirmed rate limit (a 429 or a
+ * confirmed IP block, not a presumed one) is reported by rateLimitDetails, from any tool.
+ * Returns the unsubscribe function.
+ */
+export function onRateLimited(listener: (retryAfterSeconds: number) => void): () => void {
+  rateLimitListeners.add(listener);
+  return () => rateLimitListeners.delete(listener);
+}
+
+function describeRateLimit(error: unknown): { message: string; retryAfterSeconds?: number } {
   const message = error instanceof Error ? error.message : String(error);
   if (!isRateLimitError(error)) return { message };
   const e = error as ErrorShape;

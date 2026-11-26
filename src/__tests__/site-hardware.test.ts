@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   AuditPacer,
+  sharedAuditPacer,
   siteHardware,
   siteHardwareConfig,
   DEFAULT_BUDGET_MS,
@@ -9,7 +10,7 @@ import {
   MAX_PAGE_SIZE,
   MIN_BUDGET_MS,
 } from "../site-hardware.js";
-import { DattoRateLimitedError } from "../rate-limit.js";
+import { DattoIpBlockedError, DattoRateLimitedError, rateLimitDetails, resetRateLimitState } from "../rate-limit.js";
 import { hiddenUdfKeys, redactUdfs, HIDDEN } from "../udf-redact.js";
 
 function devices(n: number) {
@@ -217,6 +218,45 @@ describe("siteHardware ordering, shared pacing and deadline", () => {
     expect(calls).toBe(1);
     expect(r.returned).toBe(1);
     expect(r.nextOffset).toBe(1);
+  });
+
+  it("never treats a listing cut short by a rate limit as the whole site, even after the backoff ends", async () => {
+    let t = 0;
+    const pacer = new AuditPacer();
+    let audits = 0;
+    const r = await siteHardware(
+      "s",
+      {
+        listDevices: async () => {
+          pacer.backOff(t + 1_000); // another call is rate-limited mid-listing: the listing is aborted
+          t += 5_000; // the in-flight page answers after that backoff has ended
+          return devices(1); // only the devices read before the abort
+        },
+        audit: async (u) => (audits++, audit(u)),
+        now: () => t,
+        sleep: async (ms: number) => {
+          t += ms;
+        },
+        pacer,
+      },
+      { offset: 0, budgetMs: 60_000 }
+    );
+    expect(audits).toBe(0);
+    expect(r.returned).toBe(0);
+    expect(r.nextOffset).toBe(0);
+    expect(r.rateLimited?.message).toMatch(/interrupted the device listing/);
+    expect(r.rateLimited?.retryAfterSeconds).toBeGreaterThanOrEqual(1);
+  });
+
+  it("backs off the shared pacer for a rate limit reported by any tool, but not for a presumed block", () => {
+    sharedAuditPacer.reset();
+    resetRateLimitState();
+    rateLimitDetails(new DattoIpBlockedError("/v2/device/x/patches", 300, true));
+    expect(sharedAuditPacer.backoffSeconds(Date.now())).toBe(0);
+    rateLimitDetails(new DattoRateLimitedError("/v2/device/x/patches", 20));
+    expect(sharedAuditPacer.backoffSeconds(Date.now())).toBeGreaterThan(15);
+    sharedAuditPacer.reset();
+    resetRateLimitState();
   });
 
   it("does not start any audit when listing the devices outlasts the budget", async () => {

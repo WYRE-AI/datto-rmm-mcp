@@ -145,6 +145,36 @@ function hardwareResult(body: Awaited<ReturnType<typeof rpc>>) {
   };
 }
 
+describe("datto_site_hardware after another tool's rate limit", () => {
+  it("sends no listing or audit while a 429 from datto_get_device_patches is in effect", async () => {
+    const DEVICE = "00000000-0000-4000-8000-0000000000d1";
+    const sent: string[] = [];
+    globalThis.fetch = vi.fn(async (input) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.startsWith(`${DATTO_HOST}/auth/oauth/token`)) {
+        return json({ access_token: "fake-token", token_type: "bearer", expires_in: 3600 });
+      }
+      sent.push(url);
+      if (url.startsWith(`${DATTO_HOST}/api/v2/device/${DEVICE}/patches`)) {
+        return json({ message: "Too Many Requests" }, 429, { "Retry-After": "20" });
+      }
+      if (url.startsWith(`${DATTO_HOST}/api/v2/site/${SITE}/devices`)) {
+        return json({ pageDetails: { count: 1, nextPageUrl: null }, devices: [{ uid: "dev-a", hostname: "A" }] });
+      }
+      return json({ systemInfo: { manufacturer: "HP" } });
+    }) as typeof fetch;
+
+    const patches = await rpc("tools/call", { name: "datto_get_device_patches", arguments: { deviceUid: DEVICE } });
+    expect(patches.result?.isError).toBe(true);
+    sent.length = 0;
+
+    const body = await rpc("tools/call", { name: "datto_site_hardware", arguments: { siteUid: SITE } });
+    expect(body.result?.isError).toBe(true);
+    expect(body.result?.content?.[0]?.text).toMatch(/Try again in [0-9]+ s/);
+    expect(sent).toEqual([]);
+  });
+});
+
 describe("datto_site_hardware listing deadline", () => {
   it("stops paging through the site's devices once the time budget has passed", async () => {
     vi.stubEnv("DATTO_SITE_HARDWARE_BUDGET_MS", "1000");

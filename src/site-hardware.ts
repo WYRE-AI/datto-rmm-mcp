@@ -23,7 +23,7 @@
  * stable order even when hostnames repeat.
  */
 
-import { rateLimitDetails, isRateLimitError } from "./rate-limit.js";
+import { rateLimitDetails, isRateLimitError, onRateLimited } from "./rate-limit.js";
 
 /** Devices read per call when the caller does not pass `max` (never more than the page size). */
 export const DEFAULT_MAX_DEVICES = 50;
@@ -89,6 +89,10 @@ export class AuditPacer {
 
 /** The process-wide pacer used when a call does not pass its own. */
 export const sharedAuditPacer = new AuditPacer();
+
+// A rate limit reported by any tool (patches, jobs, the SDK...) backs off the hardware
+// scans too: Datto's limit is per account and its IP block per source IP.
+onRateLimited((seconds) => sharedAuditPacer.backOff(Date.now() + seconds * 1000));
 
 const TIMED_OUT = Symbol("timed out");
 
@@ -256,8 +260,12 @@ export async function siteHardware(
     return request;
   };
 
-  /** Result for a call that sent nothing because a rate-limit backoff is running. */
-  const backedOffBeforeListing = (seconds: number): SiteHardwareResult => ({
+  /**
+   * Result for a call that audited nothing because of a rate limit: a backoff was running
+   * before or after the listing, or the listing was cut short by one (`interrupted`), in
+   * which case the devices it returned are incomplete and must not be used.
+   */
+  const backedOffBeforeListing = (seconds: number, interrupted = false): SiteHardwareResult => ({
     siteUid,
     totalDevices: 0,
     offset,
@@ -266,7 +274,9 @@ export async function siteHardware(
     nextOffset: offset,
     rateLimited: {
       message:
-        "Datto RMM rate-limited another datto_site_hardware call (HTTP 429), so the site's devices were not listed. " +
+        (interrupted
+          ? "A Datto RMM rate limit (HTTP 429) interrupted the device listing, so the list is incomplete and nothing was audited. "
+          : "Datto RMM rate-limited another request (HTTP 429), so the site's devices were not listed. ") +
         `Try again in ${seconds} s.`,
       retryAfterSeconds: seconds,
     },
@@ -293,6 +303,9 @@ export async function siteHardware(
       `Listing the devices in site ${siteUid} took longer than the ${Math.ceil(budgetMs / 1000)} s time budget, so no audits were read. Try again.`
     );
   }
+  // A listing aborted by a rate limit returns only the devices read before the abort.
+  // Never treat that as the whole site, even when the backoff has already ended.
+  if (listing.signal.aborted) return backedOffBeforeListing(Math.max(1, pacer.backoffSeconds(now())), true);
   const backoffAfterListing = pacer.backoffSeconds(now());
   if (backoffAfterListing > 0) return backedOffBeforeListing(backoffAfterListing);
   const listedRaw = listedOrTimeout;
