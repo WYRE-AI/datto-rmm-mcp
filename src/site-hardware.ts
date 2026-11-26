@@ -45,6 +45,17 @@ export const MAX_PAGE_SIZE = 250;
  * Spaces audits `gapMs` apart across every caller that shares it. Datto's limit is per
  * account and its IP block is per source IP, so one pacer serves the whole process.
  */
+/**
+ * Thrown by the `beforeSend` check handed to listDevices / audit when a request must
+ * not go out: the call's time budget is spent, or a rate-limit backoff is running.
+ */
+export class RequestCancelled extends Error {
+  constructor(readonly reason: "deadline" | "backoff") {
+    super(reason === "deadline" ? "Not sent: the time budget was spent." : "Not sent: a rate-limit backoff is running.");
+    this.name = "RequestCancelled";
+  }
+}
+
 export class AuditPacer {
   private nextSlot = 0;
   private backoffUntil = 0;
@@ -200,9 +211,9 @@ export interface SiteHardwareDeps {
    * page request: it waits for a slot on the shared pacer, so listing pages and audits from
    * every call together stay one request per gap. Stop when `signal` is aborted.
    */
-  listDevices: (signal: AbortSignal, pace: () => Promise<void>) => Promise<unknown[]>;
+  listDevices: (signal: AbortSignal, pace: () => Promise<void>, beforeSend: () => void) => Promise<unknown[]>;
   /** One device's full audit. */
-  audit: (deviceUid: string) => Promise<unknown>;
+  audit: (deviceUid: string, beforeSend: () => void) => Promise<unknown>;
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
   /** Shared audit pacing (default: sharedAuditPacer, one per process). */
@@ -249,6 +260,11 @@ export async function siteHardware(
   const pacer = deps.pacer ?? sharedAuditPacer;
   const started = now();
   const remaining = () => budgetMs - (now() - started);
+  /** Run immediately before an audit (or listing page) goes out: stop on a spent budget or a backoff. */
+  const auditBeforeSend = (): void => {
+    if (pacer.backoffSeconds(now()) > 0) throw new RequestCancelled("backoff");
+    if (remaining() <= 0) throw new RequestCancelled("deadline");
+  };
 
   /**
    * Records a rate limit from a listing or audit request on the shared pacer, even when
@@ -300,6 +316,11 @@ export async function siteHardware(
     listing.abort();
   };
   const stopListening = pacer.onBackOff(() => stopListing("backoff"));
+  // Run immediately before each page request goes out (after authentication too).
+  const listingBeforeSend = (): void => {
+    if (listing.signal.aborted) throw new RequestCancelled(listingStop ?? "backoff");
+    auditBeforeSend();
+  };
   let listedOrTimeout: unknown[] | typeof TIMED_OUT;
   try {
     const paceListingPage = async (): Promise<void> => {
@@ -312,9 +333,16 @@ export async function siteHardware(
       if (wait > 0) await sleep(wait);
       if (remaining() <= 0) stopListing("deadline");
     };
-    listedOrTimeout = await withDeadline(observeRateLimit(deps.listDevices(listing.signal, paceListingPage)), remaining(), () =>
-      stopListing("deadline")
+    listedOrTimeout = await withDeadline(
+      observeRateLimit(deps.listDevices(listing.signal, paceListingPage, listingBeforeSend)),
+      remaining(),
+      () => stopListing("deadline")
     );
+  } catch (error) {
+    if (!(error instanceof RequestCancelled)) throw error;
+    // A page was stopped before it was sent: same outcome as an abort for that reason.
+    stopListing(error.reason);
+    listedOrTimeout = [];
   } finally {
     stopListening();
   }
@@ -384,7 +412,7 @@ export async function siteHardware(
     }
     const base = { deviceUid: d.uid, hostname: d.hostname, deviceType: d.deviceType, online: d.online };
     try {
-      const audit = await withDeadline(observeRateLimit(deps.audit(d.uid)), remaining());
+      const audit = await withDeadline(observeRateLimit(deps.audit(d.uid, auditBeforeSend)), remaining());
       if (audit === TIMED_OUT) {
         stoppedAt = offset + i;
         notes.push(
@@ -400,6 +428,21 @@ export async function siteHardware(
         serialNumber: str(field(field(audit, "bios"), "serialNumber")),
       });
     } catch (error) {
+      if (error instanceof RequestCancelled) {
+        // Checked at the last moment (after authentication): nothing was sent.
+        stoppedAt = offset + i;
+        if (error.reason === "backoff") {
+          const seconds = Math.max(1, pacer.backoffSeconds(now()));
+          rateLimited = {
+            message: `Datto RMM rate-limited another request (HTTP 429), so no more audits were sent. Try again in ${seconds} s.`,
+            retryAfterSeconds: seconds,
+          };
+          notes.push(`Stopped: Datto RMM rate-limited the requests (HTTP 429). Try again in ${seconds} s, continuing with offset ${stoppedAt}.`);
+        } else {
+          notes.push(`Stopped at the time limit after ${rows.length} devices; continue with offset ${stoppedAt}.`);
+        }
+        break;
+      }
       if (isRateLimitError(error)) {
         // Never retried: continuing after a 429 gets the source IP blocked.
         const { message, retryAfterSeconds } = rateLimitDetails(error);

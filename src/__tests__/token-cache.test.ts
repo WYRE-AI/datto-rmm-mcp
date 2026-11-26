@@ -80,3 +80,46 @@ describe("429 response bodies", () => {
     expect(cancelled).toBe(true);
   });
 });
+
+describe("dattoApiGet beforeSend", () => {
+  it("is checked after authentication and again before the retry after a 401", async () => {
+    let apiCalls = 0;
+    let tokens = 0;
+    globalThis.fetch = vi.fn(async (input) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.startsWith(`${DATTO_HOST}/auth/oauth/token`)) {
+        tokens++;
+        return new Response(JSON.stringify({ access_token: `t-${tokens}`, token_type: "bearer", expires_in: 3600 }), { status: 200 });
+      }
+      apiCalls++;
+      return new Response("{}", { status: apiCalls === 1 ? 401 : 200 });
+    }) as typeof fetch;
+    let checks = 0;
+    const beforeSend = () => {
+      if (++checks === 2) throw new Error("backoff started");
+    };
+    await expect(
+      dattoApiGet({ apiKey: "guard-key", apiSecretKey: "guard-secret", platform: "concord" }, "/v2/x", beforeSend)
+    ).rejects.toThrow(/backoff started/);
+    expect(apiCalls).toBe(1); // the 401 retry was not sent
+    expect(tokens).toBe(2); // the fresh token was fetched, then the check stopped the request
+  });
+
+  it("stops the first request when the check fails after authentication", async () => {
+    let apiCalls = 0;
+    globalThis.fetch = vi.fn(async (input) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.startsWith(`${DATTO_HOST}/auth/oauth/token`)) {
+        return new Response(JSON.stringify({ access_token: "t", token_type: "bearer", expires_in: 3600 }), { status: 200 });
+      }
+      apiCalls++;
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+    await expect(
+      dattoApiGet({ apiKey: "guard-key-2", apiSecretKey: "s", platform: "concord" }, "/v2/x", () => {
+        throw new Error("deadline");
+      })
+    ).rejects.toThrow(/deadline/);
+    expect(apiCalls).toBe(0);
+  });
+});

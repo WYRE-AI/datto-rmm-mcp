@@ -169,8 +169,13 @@ export interface PatchesResponse {
  * handed back for paging (`pageDetails.nextPageUrl`). A full URL must point
  * at this credential set's own platform API - the bearer token is never sent
  * to any other host, whatever a response body says.
+ *
+ * `beforeSend`, when given, runs immediately before every request that goes to
+ * Datto (after authentication, and again before the one retry after a 401) and
+ * may throw to stop it, so a caller's deadline or backoff is checked at the last
+ * moment rather than only before the token await.
  */
-export async function dattoApiGet<T>(creds: DattoCredentials, pathOrUrl: string): Promise<T> {
+export async function dattoApiGet<T>(creds: DattoCredentials, pathOrUrl: string, beforeSend?: () => void): Promise<T> {
   const apiUrl = PLATFORM_URLS[creds.platform];
   let url: string;
   if (/^https?:\/\//i.test(pathOrUrl)) {
@@ -184,6 +189,7 @@ export async function dattoApiGet<T>(creds: DattoCredentials, pathOrUrl: string)
 
   const token = await getAccessToken(creds);
 
+  beforeSend?.();
   const response = await fetch(url, {
     headers: { Authorization: `Bearer ${token}` },
   });
@@ -196,6 +202,7 @@ export async function dattoApiGet<T>(creds: DattoCredentials, pathOrUrl: string)
     // re-authenticate because of one unrelated 401.
     tokenCache.delete(tokenCacheKey(creds));
     const retryToken = await getAccessToken(creds);
+    beforeSend?.();
     const retryResponse = await fetch(url, {
       headers: { Authorization: `Bearer ${retryToken}` },
     });

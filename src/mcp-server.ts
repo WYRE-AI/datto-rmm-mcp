@@ -177,7 +177,8 @@ async function listSiteDevicesPaced(
   siteUid: string,
   max: number,
   signal: AbortSignal,
-  pace: () => Promise<void>
+  pace: () => Promise<void>,
+  beforeSend: () => void
 ): Promise<unknown[]> {
   const items: unknown[] = [];
   let next: string | null = `/v2/site/${encodeURIComponent(siteUid)}/devices`;
@@ -186,7 +187,8 @@ async function listSiteDevicesPaced(
     if (signal.aborted) break;
     const response: { devices?: unknown[]; pageDetails?: { nextPageUrl?: string | null } } = await dattoApiGet(
       creds,
-      next
+      next,
+      beforeSend
     );
     items.push(...(response.devices ?? []));
     if (signal.aborted) break;
@@ -1406,10 +1408,12 @@ export function createMcpServer(
             siteUid,
             {
               // One more than the limit, so a site larger than the limit is reported as truncated.
-              listDevices: (signal, pace) => listSiteDevicesPaced(creds, siteUid, SITE_DEVICE_LIST_LIMIT + 1, signal, pace),
+              listDevices: (signal, pace, beforeSend) =>
+                listSiteDevicesPaced(creds, siteUid, SITE_DEVICE_LIST_LIMIT + 1, signal, pace, beforeSend),
               // One attempt per audit (dattoApiGet), not the SDK, whose 5xx retry would
               // ignore a backoff recorded by another call in the meantime.
-              audit: (deviceUid) => dattoApiGet(creds, `/v2/audit/device/${encodeURIComponent(deviceUid)}`),
+              audit: (deviceUid, beforeSend) =>
+                dattoApiGet(creds, `/v2/audit/device/${encodeURIComponent(deviceUid)}`, beforeSend),
             },
             { offset, max, budgetMs: config.budgetMs, pageSize: config.pageSize }
           );

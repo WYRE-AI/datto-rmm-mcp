@@ -339,6 +339,83 @@ describe("siteHardware ordering, shared pacing and deadline", () => {
     expect(requests).toBe(1);
   });
 
+  it("sends no audit when a backoff starts while it is authenticating", async () => {
+    const pacer = new AuditPacer();
+    let sent = 0;
+    let calls = 0;
+    const r = await siteHardware(
+      "s",
+      {
+        listDevices: async () => devices(3),
+        audit: async (u, beforeSend) => {
+          await Promise.resolve(); // authenticating
+          if (++calls === 2) pacer.backOff(Date.now() + 20_000); // another tool reports a 429
+          beforeSend();
+          sent++;
+          return audit(u);
+        },
+        pacer,
+      },
+      { gapMs: 0 }
+    );
+    expect(sent).toBe(1);
+    expect(r.returned).toBe(1);
+    expect(r.nextOffset).toBe(1);
+    expect(r.rateLimited?.retryAfterSeconds).toBeGreaterThan(0);
+  });
+
+  it("sends no audit when authentication runs past the deadline", async () => {
+    let t = 0;
+    let sent = 0;
+    const r = await siteHardware(
+      "s",
+      {
+        listDevices: async () => devices(2),
+        audit: async (u, beforeSend) => {
+          await Promise.resolve();
+          t += 5_000; // a slow token request, after the call started
+          beforeSend();
+          sent++;
+          return audit(u);
+        },
+        now: () => t,
+        sleep: async (ms: number) => {
+          t += ms;
+        },
+        pacer: new AuditPacer(),
+      },
+      { gapMs: 0, budgetMs: 2_000 }
+    );
+    expect(sent).toBe(0);
+    expect(r.returned).toBe(0);
+    expect(r.nextOffset).toBe(0);
+    expect(r.notes?.join(" ")).toMatch(/time limit/);
+  });
+
+  it("sends no listing page when a backoff starts while it is authenticating", async () => {
+    const pacer = new AuditPacer();
+    let pagesSent = 0;
+    let audits = 0;
+    const r = await siteHardware(
+      "s",
+      {
+        listDevices: async (_signal, pace, beforeSend) => {
+          await pace();
+          pacer.backOff(Date.now() + 20_000); // reported during authentication
+          beforeSend();
+          pagesSent++;
+          return devices(1);
+        },
+        audit: async (u) => (audits++, audit(u)),
+        pacer,
+      },
+      {}
+    );
+    expect(pagesSent).toBe(0);
+    expect(audits).toBe(0);
+    expect(r.rateLimited?.retryAfterSeconds).toBeGreaterThan(0);
+  });
+
   it("does not start any audit when listing the devices outlasts the budget", async () => {
     let calls = 0;
     await expect(
