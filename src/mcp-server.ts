@@ -37,6 +37,7 @@ import { ALERT_CARD_HTML } from "./generated/alert-card-html.js";
 import { getDevicePatches, getSitePatches } from "./patches.js";
 import { parseDeviceUid, parseUdfFields } from "./udf.js";
 import { listDeviceJobs } from "./device-jobs.js";
+import { rateLimitDetails } from "./rate-limit.js";
 import {
   applyUntrustedContentMarkers,
   type ToolResultLike,
@@ -125,6 +126,9 @@ function createClient(creds: DattoCredentials): DattoRmmClient {
     apiKey: creds.apiKey,
     apiSecretKey: creds.apiSecretKey,
     platform: creds.platform,
+    // Never retry a 429: Datto blocks the source IP (403, about 5 minutes)
+    // when requests continue after one. Older SDKs retry 3 times by default.
+    rateLimit: { maxRetries: 0 },
   });
 }
 
@@ -1353,10 +1357,16 @@ export function createMcpServer(
           };
       }
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
+        // rateLimitDetails makes a 429 / IP block say "HTTP 429" or "HTTP 403"
+        // and "Try again in N s." whichever SDK version threw it, and gives
+        // the same N as retry_after_seconds on the structured error.
+        const { message, retryAfterSeconds } = rateLimitDetails(error);
         return {
           content: [{ type: "text", text: `Error: ${message}` }],
           isError: true,
+          ...(retryAfterSeconds !== undefined
+            ? { structuredContent: { error_type: "rate_limited", retry_after_seconds: retryAfterSeconds } }
+            : {}),
         };
       }
     })();

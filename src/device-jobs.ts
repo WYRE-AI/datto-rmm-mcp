@@ -46,6 +46,7 @@
 
 import type { DattoCredentials } from "./mcp-server.js";
 import { dattoApiGet } from "./patches.js";
+import { isRateLimitError } from "./rate-limit.js";
 
 /** Default look-back window when `since` is omitted. */
 export const DEFAULT_LOOKBACK_DAYS = 7;
@@ -275,8 +276,9 @@ export async function listDeviceJobs(
   const notes: string[] = [];
 
   // Per-job results, fetched at most once each and capped per call. A 404
-  // means Datto holds no result; any other failure (403, 429, 5xx, network)
-  // is kept apart so it is reported, never mistaken for "no result".
+  // means Datto holds no result; any other failure (403, 5xx, network) is
+  // kept apart so it is reported, never mistaken for "no result". A rate
+  // limit (429 or IP block) is rethrown instead.
   const results = new Map<string, Lookup>();
   let lookups = 0;
   let lookupCapHit = false;
@@ -293,6 +295,9 @@ export async function listDeviceJobs(
       const raw = (await getResult(jobUid)) as JobResults | undefined;
       lookup = raw && typeof raw === "object" ? { kind: "ok", result: raw } : { kind: "missing" };
     } catch (error) {
+      // A 429 or IP block ends the whole call: carrying on with the other
+      // lookups is what gets the IP blocked.
+      if (isRateLimitError(error)) throw error;
       lookup = isNotFound(error)
         ? { kind: "missing" }
         : { kind: "failed", message: error instanceof Error ? error.message : String(error) };
