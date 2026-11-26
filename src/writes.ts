@@ -98,6 +98,12 @@ export async function dattoApiWrite(
     );
   }
 
+  // A rejected token is dropped before the body is read, so a truncated 401 body
+  // cannot leave it cached for the next call. The write itself is not re-sent.
+  if (response.status === 401) {
+    forgetAccessToken(creds);
+  }
+
   const text = await response.text();
 
   if (response.status === 403) {
@@ -108,9 +114,6 @@ export async function dattoApiWrite(
     // Presumed from the cooldown only: reported as the block, but it does not
     // restart the cooldown (see throwIfRateLimited in patches.ts).
     if (ipBlockSuspected()) throw new DattoIpBlockedError(path, IP_BLOCK_WAIT_SECONDS, true);
-  }
-  if (response.status === 401) {
-    forgetAccessToken(creds);
   }
   if (!response.ok) {
     throw new Error(

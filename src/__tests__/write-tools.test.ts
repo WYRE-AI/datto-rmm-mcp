@@ -355,6 +355,20 @@ describe("writes are sent once and never retried", () => {
     expect(result.structuredContent).toEqual({ error_type: "rate_limited", retry_after_seconds: 20 });
   }, 2_000);
 
+  it("a 401 with a truncated body still drops the token, so the next call gets a fresh one", async () => {
+    stubDatto(
+      () =>
+        new Response(new ReadableStream<Uint8Array>({ start(c) { c.error(new TypeError("terminated")); } }), { status: 401 })
+    );
+    const first = await call("datto_resolve_alert", { alertUid: "alert-1" });
+    expect(first.isError).toBe(true);
+    const tokenRequests = () =>
+      vi.mocked(globalThis.fetch).mock.calls.filter(([input]) => String(input).startsWith(`${DATTO_HOST}/auth/oauth/token`)).length;
+    const before = tokenRequests();
+    await call("datto_resolve_alert", { alertUid: "alert-1" });
+    expect(tokenRequests()).toBe(before + 1);
+  });
+
   it("a 401 on a write is not re-sent", async () => {
     const calls = stubDatto(() => json({}, 401));
     const result = await call("datto_resolve_alert", { alertUid: "alert-1" });
