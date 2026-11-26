@@ -416,6 +416,7 @@ describe("HTTP /mcp authentication", () => {
       apiKey: "header-key",
       apiSecretKey: "header-secret",
       platform: "merlot",
+      rateLimit: { maxRetries: 0 },
     });
     expect(logs.text()).not.toContain(S2S_SECRET);
     expect(logs.text()).not.toContain(ENV_API_SECRET);

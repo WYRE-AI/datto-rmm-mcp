@@ -22,10 +22,21 @@
  * per-patch installed/missing/pending signal this module exists to expose.
  */
 
+import { createHash } from "node:crypto";
 import type { Platform } from "@wyre-ai/node-datto-rmm";
 import type { DattoCredentials } from "./mcp-server.js";
+import {
+  DattoIpBlockedError,
+  DattoRateLimitedError,
+  IP_BLOCK_WAIT_SECONDS,
+  RATE_LIMIT_WAIT_SECONDS,
+  ipBlockSuspected,
+  looksLikeIpBlock,
+  noteRateLimited,
+  retryAfterSeconds,
+} from "./rate-limit.js";
 
-const PLATFORM_URLS: Record<Platform, string> = {
+export const PLATFORM_URLS: Record<Platform, string> = {
   pinotage: "https://pinotage-api.centrastage.net",
   merlot: "https://merlot-api.centrastage.net",
   concord: "https://concord-api.centrastage.net",
@@ -46,15 +57,48 @@ const PLATFORM_URLS: Record<Platform, string> = {
 // and presumably many more than six customers, a platform-only key meant any
 // two customers on the same platform bucket would collide and silently
 // receive each other's cached access token - a cross-tenant credential leak,
-// not a hypothetical. apiKey uniquely identifies the credential set without
-// needing to hash in apiSecretKey too.
+// not a hypothetical. The key also includes a SHA-256 digest of apiSecretKey
+// (never the secret itself): in gateway mode the caller supplies both values,
+// so a cached token must only be served to a request with the same full
+// credential pair. A wrong secret misses the cache and fails at Datto.
 const tokenCache = new Map<string, { accessToken: string; expiresAt: number }>();
 
-function tokenCacheKey(creds: DattoCredentials): string {
-  return `${creds.platform}:${creds.apiKey}`;
+/**
+ * A 429 or an IP-block 403 is reported, never retried (Datto blocks the IP
+ * when calls continue after a 429). A 403 is the IP block when its body says
+ * so or when it arrives during the cooldown after a 429; any other 403 is
+ * left to the caller's ordinary error path.
+ */
+async function throwIfRateLimited(response: Response, path: string): Promise<void> {
+  if (response.status === 429) {
+    const seconds = retryAfterSeconds(response.headers.get("retry-after")) ?? RATE_LIMIT_WAIT_SECONDS;
+    // The body is never read: cancel it (without waiting) so the connection is released.
+    void response.body?.cancel().catch(() => {});
+    noteRateLimited();
+    throw new DattoRateLimitedError(path, seconds);
+  }
+  if (response.status === 403) {
+    // Read a copy: the caller may still need the body for its own error. A truncated
+    // body reads as empty, so the cooldown check below still applies.
+    const confirmed = looksLikeIpBlock(await response.clone().text().catch(() => ""));
+    if (confirmed) {
+      noteRateLimited();
+      throw new DattoIpBlockedError(path);
+    }
+    // A bare 403 during the cooldown is presumed to be the block. It reports
+    // the usual wait but does not restart the cooldown (only a 429 or a
+    // confirmed block does), so a permissions error cannot keep itself
+    // looking like a rate limit.
+    if (ipBlockSuspected()) throw new DattoIpBlockedError(path, IP_BLOCK_WAIT_SECONDS, true);
+  }
 }
 
-async function getAccessToken(creds: DattoCredentials): Promise<string> {
+function tokenCacheKey(creds: DattoCredentials): string {
+  const secretDigest = createHash("sha256").update(creds.apiSecretKey, "utf8").digest("base64url");
+  return `${creds.platform}:${creds.apiKey}:${secretDigest}`;
+}
+
+export async function getAccessToken(creds: DattoCredentials): Promise<string> {
   const apiUrl = PLATFORM_URLS[creds.platform];
   const cacheKey = tokenCacheKey(creds);
 
@@ -77,6 +121,7 @@ async function getAccessToken(creds: DattoCredentials): Promise<string> {
     }).toString(),
   });
 
+  await throwIfRateLimited(response, "/auth/oauth/token");
   if (!response.ok) {
     // Drain the body (Datto's own OAuth error detail) without relaying it -
     // this can propagate straight through to an MCP tool-call result, and an
@@ -125,8 +170,13 @@ export interface PatchesResponse {
  * handed back for paging (`pageDetails.nextPageUrl`). A full URL must point
  * at this credential set's own platform API - the bearer token is never sent
  * to any other host, whatever a response body says.
+ *
+ * `beforeSend`, when given, runs immediately before every request that goes to
+ * Datto (after authentication, and again before the one retry after a 401) and
+ * may throw to stop it, so a caller's deadline or backoff is checked at the last
+ * moment rather than only before the token await.
  */
-export async function dattoApiGet<T>(creds: DattoCredentials, pathOrUrl: string): Promise<T> {
+export async function dattoApiGet<T>(creds: DattoCredentials, pathOrUrl: string, beforeSend?: () => void): Promise<T> {
   const apiUrl = PLATFORM_URLS[creds.platform];
   let url: string;
   if (/^https?:\/\//i.test(pathOrUrl)) {
@@ -140,10 +190,12 @@ export async function dattoApiGet<T>(creds: DattoCredentials, pathOrUrl: string)
 
   const token = await getAccessToken(creds);
 
+  beforeSend?.();
   const response = await fetch(url, {
     headers: { Authorization: `Bearer ${token}` },
   });
 
+  await throwIfRateLimited(response, new URL(url).pathname);
   if (response.status === 401) {
     // Token may have been invalidated server-side - retry once with a fresh
     // one. Only this credential set's entry, not the whole cache - other
@@ -151,9 +203,11 @@ export async function dattoApiGet<T>(creds: DattoCredentials, pathOrUrl: string)
     // re-authenticate because of one unrelated 401.
     tokenCache.delete(tokenCacheKey(creds));
     const retryToken = await getAccessToken(creds);
+    beforeSend?.();
     const retryResponse = await fetch(url, {
       headers: { Authorization: `Bearer ${retryToken}` },
     });
+    await throwIfRateLimited(retryResponse, new URL(url).pathname);
     if (!retryResponse.ok) {
       throw new Error(`Datto RMM API error: ${retryResponse.status} ${retryResponse.statusText}`);
     }
@@ -180,4 +234,9 @@ export function getDevicePatches(creds: DattoCredentials, deviceUid: string): Pr
 // /v2/sites/{uid}/patches this used to call does not exist and 404'd.
 export function getSitePatches(creds: DattoCredentials, siteUid: string): Promise<PatchesResponse> {
   return fetchPatches(creds, `/v2/site/${encodeURIComponent(siteUid)}/patches`);
+}
+
+/** Drops this credential set's cached token, so the next call fetches a fresh one. */
+export function forgetAccessToken(creds: DattoCredentials): void {
+  tokenCache.delete(tokenCacheKey(creds));
 }
