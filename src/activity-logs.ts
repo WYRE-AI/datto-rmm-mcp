@@ -69,6 +69,11 @@ const MAX_LIST_VALUES = 20;
 const MAX_SEARCH_CHARS = 500;
 const MAX_USER_CHARS = 100;
 
+/**
+ * Arguments of datto_list_activity_logs. A new search uses the filters; when
+ * `cursor` is set it takes precedence and every other filter is ignored: the
+ * search continues with the filters saved in the cursor.
+ */
 export interface ListActivityLogsOptions {
   from?: string;
   until?: string;
@@ -115,6 +120,11 @@ export interface ActivityRow {
   details?: Record<string, unknown> | string;
 }
 
+/**
+ * Result of datto_list_activity_logs. `from`, `until` and `order` are only
+ * returned for a new search; a call resumed with `cursor` returns the rows,
+ * counts, notes and the next cursor, but not the original window.
+ */
 export interface ActivityLogsResult {
   from?: string;
   until?: string;
@@ -244,7 +254,7 @@ function toRow(row: ActivityLog): ActivityRow {
     userId: row.user?.id ?? undefined,
     site: str(row.site?.name),
     siteId: row.site?.id ?? undefined,
-    hostname: str(row.hostname),
+    hostname: rowHostname(row),
     deviceId: row.deviceId ?? undefined,
     details: compactDetails(row.details),
   };
@@ -253,6 +263,41 @@ function toRow(row: ActivityLog): ActivityRow {
     if (out[key] === undefined) delete out[key];
   }
   return out;
+}
+
+const STRING_ARGS = ["from", "until", "user", "entity", "category", "action", "hostname", "search", "order", "cursor"] as const;
+const NUMBER_ARGS = ["userId", "siteId", "max"] as const;
+
+/**
+ * Checks the raw tool arguments before anything is converted or sent to Datto:
+ * text fields must be strings and `userId` / `siteId` / `max` numbers (or
+ * digit strings), so `siteId: true` is an input error instead of becoming site 1.
+ *
+ * @throws Error naming the first argument with the wrong type.
+ */
+export function validateActivityLogsArgs(raw: unknown): ListActivityLogsOptions {
+  if (raw === undefined || raw === null) return {};
+  if (typeof raw !== "object" || Array.isArray(raw)) throw new Error("arguments must be an object");
+  const args = raw as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const key of STRING_ARGS) {
+    const v = args[key];
+    if (v === undefined || v === null) continue;
+    if (typeof v !== "string") throw new Error(`${key} must be a string`);
+    out[key] = v;
+  }
+  for (const key of NUMBER_ARGS) {
+    const v = args[key];
+    if (v === undefined || v === null || v === "") continue;
+    if (typeof v === "number" && Number.isFinite(v)) {
+      out[key] = v;
+    } else if (typeof v === "string" && /^\d+$/.test(v.trim())) {
+      out[key] = Number(v.trim());
+    } else {
+      throw new Error(`${key} must be a number`);
+    }
+  }
+  return out as ListActivityLogsOptions;
 }
 
 /**
@@ -280,7 +325,13 @@ export async function listActivityLogs(
     const from = options.from
       ? parseDateInput(options.from, "from")
       : new Date(until.getTime() - DEFAULT_ACTIVITY_LOOKBACK_DAYS * DAY_MS);
-    if (from.getTime() >= until.getTime()) throw new Error("from must be earlier than until");
+    // Datto takes whole seconds: compare the bounds as they will be sent, so a window that
+    // collapses at that precision is refused instead of sent as an empty range.
+    const fromApi = toApiDate(from);
+    const untilApi = toApiDate(until);
+    if (from.getTime() >= until.getTime() || fromApi >= untilApi) {
+      throw new Error("from must be earlier than until (Datto compares whole seconds)");
+    }
 
     const order = options.order === undefined || options.order === "" ? "desc" : options.order;
     if (order !== "asc" && order !== "desc") throw new Error('order must be "asc" or "desc"');
@@ -305,8 +356,8 @@ export async function listActivityLogs(
     }
 
     const query = new URLSearchParams({
-      from: toApiDate(from),
-      until: toApiDate(until),
+      from: fromApi,
+      until: untilApi,
       order,
       size: String(PAGE_SIZE),
     });
@@ -326,7 +377,7 @@ export async function listActivityLogs(
     if (searchParts.length > 0) query.set("searchQuery", searchParts.join(" AND "));
 
     start = { u: `/v2/activity-logs?${query.toString()}`, s: 0, user, host };
-    window = { from: toApiDate(from), until: toApiDate(until), order };
+    window = { from: fromApi, until: untilApi, order };
 
     if (now.getTime() - from.getTime() > ACTIVITY_RETENTION_DAYS * DAY_MS) {
       notes.push(`Datto RMM keeps the Activity Log for ${ACTIVITY_RETENTION_DAYS} days; nothing older can be returned.`);
@@ -377,7 +428,8 @@ export async function listActivityLogs(
     skip = 0;
 
     const nextUrl = page.pageDetails?.nextPageUrl ?? undefined;
-    if (!nextUrl || activities.length === 0) break;
+    // Follow nextPageUrl until it is null, even past an empty page (the page cap bounds this).
+    if (!nextUrl) break;
     if (!isActivityLogsUrl(nextUrl, apiUrl)) {
       throw new Error("Refusing to follow a Datto RMM paging URL outside the activity-log endpoint");
     }
@@ -396,7 +448,10 @@ export async function listActivityLogs(
 
   if (rows.length === 0) {
     const filters = [
-      userNeedle ? `user "${options.user?.trim() ?? userNeedle}"` : undefined,
+      // The filter actually searched for: the cursor's saved one when resuming.
+      userNeedle
+        ? `user "${!options.cursor && typeof options.user === "string" ? options.user.trim() : userNeedle}"`
+        : undefined,
       start.host ? `hostname "${start.host}"` : undefined,
     ].filter(Boolean);
     notes.push(

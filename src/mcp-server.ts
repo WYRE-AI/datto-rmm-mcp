@@ -40,7 +40,7 @@ import {
   DEFAULT_MAX_ACTIVITIES,
   MAX_MAX_ACTIVITIES,
   listActivityLogs,
-  type ListActivityLogsOptions,
+  validateActivityLogsArgs,
 } from "./activity-logs.js";
 import { getDevicePatches, getSitePatches } from "./patches.js";
 import { parseDeviceUid, parseUdfFields } from "./udf.js";
@@ -1363,7 +1363,8 @@ export function createMcpServer(
 
         // Read directly, like datto_list_device_jobs (see activity-logs.ts).
         case "datto_list_activity_logs": {
-          const result = await listActivityLogs(creds, (args ?? {}) as ListActivityLogsOptions);
+          // Argument types are checked before any conversion or request.
+          const result = await listActivityLogs(creds, validateActivityLogsArgs(args));
           return {
             content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
           };

@@ -90,6 +90,7 @@ export interface ActivityLog {
   hasStdErr?: boolean;
 }
 
+/** One page of `GET /v2/activity-logs`: the rows and the `nextPageUrl` (null on the last page). */
 export interface ActivityLogsPage {
   pageDetails?: { nextPageUrl?: string | null };
   activities?: ActivityLog[];
@@ -169,6 +170,14 @@ export function toApiDate(d: Date): string {
  *  are already parsed as UTC by `Date`. */
 const OFFSET_FREE_DATE_TIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?$/;
 
+/**
+ * Parses a tool's date or date-time argument as UTC (see OFFSET_FREE_DATE_TIME_RE: an
+ * offset-free date-time gets `Z`).
+ *
+ * @param value - ISO 8601 date or date-time.
+ * @param field - Argument name, used in the error.
+ * @throws Error when the value is not a valid date.
+ */
 export function parseDateInput(value: string, field: string): Date {
   const trimmed = value.trim();
   const d = new Date(OFFSET_FREE_DATE_TIME_RE.test(trimmed) ? `${trimmed}Z` : trimmed);
@@ -178,6 +187,7 @@ export function parseDateInput(value: string, field: string): Date {
   return d;
 }
 
+/** An activity's `date` (unix seconds, possibly fractional) in epoch milliseconds, or undefined when absent or invalid. */
 export function activityTimeMs(date: ActivityLog["date"]): number | undefined {
   if (date === undefined || date === null) return undefined;
   const seconds = Number(date);
@@ -193,6 +203,7 @@ function ranOnMs(ranOn: JobResults["ranOn"]): number | undefined {
   return Number.isNaN(parsed) ? undefined : parsed;
 }
 
+/** An activity's `details` as an object: parsed when it is a JSON string, undefined when empty or not a JSON object. */
 export function parseDetails(details: ActivityLog["details"]): Record<string, unknown> | undefined {
   if (!details) return undefined;
   if (typeof details === "object") return details;

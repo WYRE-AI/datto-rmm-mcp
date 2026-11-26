@@ -18,14 +18,14 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-async function call(name: string, args: Record<string, unknown>) {
+async function call(name: string, args: Record<string, unknown>, env: Record<string, string> = ENV) {
   return worker.fetch(
     new Request("http://worker.local/mcp", {
       method: "POST",
       headers: { Accept: "application/json, text/event-stream", "Content-Type": "application/json" },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
     }),
-    ENV
+    env
   );
 }
 
@@ -240,13 +240,23 @@ describe("datto_list_activity_logs", () => {
     expect(await errorText(await call("datto_list_activity_logs", { user: "alex" }))).toMatch(/Refusing to follow/);
   });
 
-  it("rejects bad input before calling Datto", async () => {
-    const seen = stubFetch(() => undefined);
+  it("rejects bad input before calling Datto, including the OAuth token request", async () => {
+    // A credential no other test uses, so the token cache is cold and a token request would show.
+    const coldEnv = { DATTO_API_KEY: "cold-validation-key", DATTO_API_SECRET: "cold-validation-secret" };
+    const seen: string[] = [];
+    globalThis.fetch = vi.fn(async (input) => {
+      seen.push(typeof input === "string" ? input : input.toString());
+      throw new Error("no request may be sent for bad input");
+    }) as typeof fetch;
     const forged = Buffer.from(JSON.stringify({ u: "/v2/account/users?max=1", s: 0 })).toString("base64url");
     for (const [args, message] of [
       [{ entity: "site" }, /entity must be/],
       [{ from: "last tuesday" }, /from must be an ISO 8601/],
       [{ from: "2026-11-09", until: "2026-11-01" }, /from must be earlier than until/],
+      [{ from: "2026-11-01T09:00:00.100Z", until: "2026-11-01T09:00:00.900Z" }, /whole seconds/],
+      [{ siteId: true }, /siteId must be a number/],
+      [{ userId: "abc" }, /userId must be a number/],
+      [{ user: 5 }, /user must be a string/],
       [{ category: "job;drop" }, /category must be/],
       [{ action: "Patch  Start" }, /action must be/],
       [{ siteId: -1 }, /siteId must be a positive whole number/],
@@ -254,9 +264,39 @@ describe("datto_list_activity_logs", () => {
       [{ cursor: "not-a-cursor" }, /cursor is not a nextCursor/],
       [{ cursor: forged }, /cursor is not a nextCursor/],
     ] as const) {
-      expect(await errorText(await call("datto_list_activity_logs", args))).toMatch(message);
+      expect(await errorText(await call("datto_list_activity_logs", args, coldEnv))).toMatch(message);
     }
     expect(seen).toEqual([]);
+  });
+
+  it("returns the hostname it matched on, even when it is only in details", async () => {
+    stubFetch((url) =>
+      url.startsWith(PREFIX)
+        ? page([row(1, SAM, { entity: "DEVICE", details: JSON.stringify({ "device.hostname": "WS-01" }) })])
+        : undefined
+    );
+    const out = await result(await call("datto_list_activity_logs", { hostname: "WS-01" }));
+    expect(out.activities).toHaveLength(1);
+    expect(out.activities[0].hostname).toBe("WS-01");
+  });
+
+  it("keeps paging past an empty page while nextPageUrl is set", async () => {
+    const seen = stubFetch((url) => {
+      if (!url.startsWith(PREFIX)) return undefined;
+      return url.includes("searchAfter=2") ? page([row(1, ALEX)]) : page([], `${PREFIX}searchAfter=2`);
+    });
+    const out = await result(await call("datto_list_activity_logs", {}));
+    expect(seen).toHaveLength(2);
+    expect(out.returned).toBe(1);
+  });
+
+  it("names the cursor's saved user filter when a resumed search finds nothing", async () => {
+    stubFetch((url) => (url.startsWith(PREFIX) ? page([row(1, SAM)]) : undefined));
+    const cursor = Buffer.from(JSON.stringify({ u: "/v2/activity-logs?order=desc", s: 0, user: "alex" })).toString("base64url");
+    const out = await result(await call("datto_list_activity_logs", { cursor, user: "Sam" }));
+    expect(out.returned).toBe(0);
+    expect(out.notes.join(" ")).toMatch(/user "alex"/);
+    expect(out.notes.join(" ")).not.toMatch(/Sam/);
   });
 
   it("reports a 429 without retrying", async () => {
